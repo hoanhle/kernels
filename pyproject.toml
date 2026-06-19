@@ -1,0 +1,39 @@
+[project]
+name = "kernels"
+version = "0.1.0"
+description = "CUDA kernel experiments and benchmarks"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "torch==2.9.1",
+  "triton",
+  "cuda-bench[cu12]",
+  "numpy",
+  "pandas",
+  "tabulate",
+  "matplotlib",
+  "rich",
+  "click",
+]
+
+[dependency-groups]
+dev = [
+  "ruff",
+]
+
+[tool.uv]
+package = false
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+extend-select = ["I"]
+extend-ignore = ["F401"]
