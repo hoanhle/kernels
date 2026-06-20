@@ -1,6 +1,28 @@
+from pathlib import Path
+
 import click
 import torch
+import torch.utils.cpp_extension
 from triton.testing import do_bench
+
+CURRENT_DIR = Path(__file__).resolve().parent
+
+torch.utils.cpp_extension.load(
+    'matmul_sm120',
+    sources=[
+        CURRENT_DIR / 'matmul.cpp',
+        *sorted(CURRENT_DIR.glob('matmul_v*.cu')),
+    ],
+    extra_cuda_cflags=[
+        '-O3',
+        '-lineinfo',
+        '-Xptxas=-v',
+        '-gencode=arch=compute_120a,code=sm_120a',
+    ],
+    is_python_module=False,
+    verbose=True,
+)
+module = torch.ops.matmul_sm120
 
 #----------------------------------------------------------------------------
 # Utilities.
@@ -22,11 +44,22 @@ def make_inputs(M, N, K):
 def get_kernel(name):
     if name == 'cublas':
         return torch.mm
-    raise click.ClickException(f'Unknown kernel "{name}"')
+    try:
+        return getattr(module, name)
+    except AttributeError as exc:
+        raise click.ClickException(f'Unknown kernel "{name}"') from exc
 
 
 def compute_tflops(M, N, K, latency_ms):
     return 2 * M * N * K / latency_ms / 1e9
+
+
+def check_correctness(name, A, B):
+    if name == 'cublas':
+        return
+    out = get_kernel(name)(A, B)
+    ref = torch.mm(A.float(), B.float()).bfloat16()
+    torch.testing.assert_close(out, ref, rtol=1e-2, atol=1e-2)
 
 
 def bench_triton(name, A, B):
@@ -50,8 +83,9 @@ def profile_kernel(name, A, B):
 
 @click.command()
 @click.option('--shape',   help='Matmul shape as M_N_K',                        metavar='M_N_K', type=str, default='4096_4096_4096', show_default=True)
+@click.option('--kernel',  help='Kernel to benchmark',                          metavar='STR',   type=str, multiple=True)
 @click.option('--profile', help='Kernel to run once inside an NVTX range',      metavar='STR',   type=str, default=None)
-def cmdline(shape, profile):
+def cmdline(shape, kernel, profile):
     """Benchmark BF16 matmul kernels for SM120."""
     M, N, K = parse_shape(shape)
     A, B = make_inputs(M, N, K)
@@ -60,14 +94,14 @@ def cmdline(shape, profile):
         profile_kernel(profile, A, B)
         return
 
-    kernel = 'cublas'
-    latency_ms = bench_triton(kernel, A, B)
-    tflops = compute_tflops(M, N, K, latency_ms)
-
     print(f'shape: {shape}')
-    print(f'kernel: {kernel}')
-    print(f'latency: {latency_ms:.4f} ms')
-    print(f'TFLOPS: {tflops:.2f}')
+
+    kernels = kernel or ['cublas', 'matmul_v0']
+    for name in kernels:
+        check_correctness(name, A, B)
+        latency_ms = bench_triton(name, A, B)
+        tflops = compute_tflops(M, N, K, latency_ms)
+        print(f'{name}: {latency_ms:.4f} ms, {tflops:.2f} TFLOPS')
 
 #----------------------------------------------------------------------------
 
