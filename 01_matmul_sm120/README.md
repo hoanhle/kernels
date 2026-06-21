@@ -1,11 +1,5 @@
 # Matmul SM120
 
-## Resources
-
-- https://www.aleksagordic.com/blog/matmul
-- https://cudaforfun.substack.com/p/outperforming-cublas-on-h100-a-worklog
-- https://github.com/gau-nernst/learn-cuda/tree/main/02c_matmul_sm120
-
 ## Setup
 
 Fixed M=N=K=4096. RTX 5090 has peak 209.5 BF16 TFLOPS and global memory bandwidth of 1792 GB/s
@@ -37,14 +31,9 @@ The v0 kernels are CUDA-core baselines. They do not use tensor cores.
 | Max threads per block | 1024 |
 | Max threads per multiprocessor | 1536 |
 | Threads per warp | 32 |
-| Warp allocation granularity | Not in pasted deviceQuery |
 | Max registers per block | 65536 |
-| Max registers per multiprocessor | Not in pasted deviceQuery |
-| Register allocation unit size | Not in pasted deviceQuery |
-| Register allocation granularity | Not in pasted deviceQuery |
 | Total global memory | 32101 MiB / 33660534784 B |
 | Max shared memory per block, default | 49152 B |
-| CUDA runtime shared memory overhead per block | Not in pasted deviceQuery |
 | Shared memory per multiprocessor | 102400 B |
 | Multiprocessor count | 170 |
 | Max warps per multiprocessor | 48, computed from 1536 / 32 |
@@ -86,3 +75,9 @@ Device 0: "NVIDIA GeForce RTX 5090"
   Supports MultiDevice Co-op Kernel Launch:      Yes
   Device PCI Domain ID / Bus ID / location ID:   0 / 2 / 0
 ```
+
+## Resources
+
+- https://www.aleksagordic.com/blog/matmul
+- https://cudaforfun.substack.com/p/outperforming-cublas-on-h100-a-worklog
+- https://github.com/gau-nernst/learn-cuda/tree/main/02c_matmul_sm120
