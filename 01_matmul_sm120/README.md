@@ -20,6 +20,7 @@ The v0 kernels are CUDA-core baselines. They do not use tensor cores.
 | matmul_v0_naive |   1.51 | 0.83%                 |
 | matmul_v0_tiled |   7.39 | 4.05%                 |
 | matmul_v0_block1d |  16.70 | 9.14%                 |
+| matmul_v0_block2d |  29.76 | 16.29%                 |
 
 
 ## Notes

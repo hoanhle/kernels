@@ -49,21 +49,23 @@ __global__ void matmul_v0_tiled_kernel(
     __shared__ nv_bfloat16 As[BLOCK_SIZE * BLOCK_SIZE];
     __shared__ nv_bfloat16 Bs[BLOCK_SIZE * BLOCK_SIZE];
 
+    const int offset_m = blockIdx.y * BLOCK_SIZE;
+    const int offset_n = blockIdx.x * BLOCK_SIZE;
     const int thread_col = threadIdx.x;
     const int thread_row = threadIdx.y;
-    const int col = blockIdx.x * BLOCK_SIZE + thread_col;
-    const int row = blockIdx.y * BLOCK_SIZE + thread_row;
+    const int col = offset_n + thread_col;
+    const int row = offset_m + thread_row;
 
     float acc = 0.0f;
     for (int bk = 0; bk < K; bk += BLOCK_SIZE) {
-        const int a_col = bk + thread_col;
-        const int b_row = bk + thread_row;
+        const int k_a = bk + thread_col;
+        const int k_b = bk + thread_row;
 
         As[thread_row * BLOCK_SIZE + thread_col] =
-            (row < M && a_col < K) ? A[row * K + a_col] : __float2bfloat16(0.0f);
+            (row < M && k_a < K) ? A[row * K + k_a] : __float2bfloat16(0.0f);
 
         Bs[thread_row * BLOCK_SIZE + thread_col] =
-            (b_row < K && col < N) ? B[col * K + b_row] : __float2bfloat16(0.0f);
+            (k_b < K && col < N) ? B[col * K + k_b] : __float2bfloat16(0.0f);
 
         __syncthreads();
 
@@ -102,11 +104,13 @@ __global__ void matmul_v0_block1d_kernel(
     __shared__ nv_bfloat16 As[BM * BK];
     __shared__ nv_bfloat16 Bs[BK * BN];
 
+    const int offset_m = blockIdx.y * BM;
+    const int offset_n = blockIdx.x * BN;
     const int tid = threadIdx.x;
     const int thread_col = tid % BN;
     const int thread_row = tid / BN;
-    const int row_base = blockIdx.y * BM + thread_row * TM;
-    const int col = blockIdx.x * BN + thread_col;
+    const int row_base = offset_m + thread_row * TM;
+    const int col = offset_n + thread_col;
     const int inner_col_a = tid % BK;
     const int inner_row_a = tid / BK;
     const int inner_col_b = tid % BN;
@@ -116,15 +120,15 @@ __global__ void matmul_v0_block1d_kernel(
     for (int bk = 0; bk < K; bk += BK) {
         // This shape makes each thread load one A element and one B element.
         // Later variants can let each thread load multiple entries to use cache capacity better.
-        const int global_row_a = blockIdx.y * BM + inner_row_a;
-        const int global_k_a = bk + inner_col_a;
+        const int row_a = offset_m + inner_row_a;
+        const int k_a = bk + inner_col_a;
         As[inner_row_a * BK + inner_col_a] =
-            (global_row_a < M && global_k_a < K) ? A[global_row_a * K + global_k_a] : __float2bfloat16(0.0f);
+            (row_a < M && k_a < K) ? A[row_a * K + k_a] : __float2bfloat16(0.0f);
 
-        const int global_k_b = bk + inner_row_b;
-        const int global_col_b = blockIdx.x * BN + inner_col_b;
+        const int k_b = bk + inner_row_b;
+        const int col_b = offset_n + inner_col_b;
         Bs[inner_row_b * BN + inner_col_b] =
-            (global_k_b < K && global_col_b < N) ? B[global_col_b * K + global_k_b] : __float2bfloat16(0.0f);
+            (k_b < K && col_b < N) ? B[col_b * K + k_b] : __float2bfloat16(0.0f);
 
         __syncthreads();
 
@@ -156,4 +160,99 @@ void matmul_v0_block1d_bf16(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloa
     const dim3 threads((BM * BN) / TM);
     const dim3 blocks((N + BN - 1) / BN, (M + BM - 1) / BM);
     matmul_v0_block1d_kernel<BM, BN, BK, TM><<<blocks, threads>>>(A, B, C, M, N, K);
+}
+
+//----------------------------------------------------------------------------
+// v0.block2d: each CUDA thread computes a TM x TN tile of C in registers.
+// BM/BN/BK are the block tile sizes in M/N/K. TM/TN are per-thread tile sizes.
+
+template <int BM, int BN, int BK, int TM, int TN>
+__global__ void __launch_bounds__((BM * BN) / (TM * TN), 1) matmul_v0_block2d_kernel(
+    const nv_bfloat16 *A,
+    const nv_bfloat16 *B,
+    nv_bfloat16 *C,
+    int M,
+    int N,
+    int K) {
+    constexpr int num_threads = (BM * BN) / (TM * TN);
+
+    __shared__ nv_bfloat16 As[BM * BK];
+    __shared__ nv_bfloat16 Bs[BK * BN];
+
+    const int offset_m = blockIdx.y * BM;
+    const int offset_n = blockIdx.x * BN;
+    const int tid = threadIdx.x;
+    const int thread_col = tid % (BN / TN);
+    const int thread_row = tid / (BN / TN);
+    const int row_base = offset_m + thread_row * TM;
+    const int col_base = offset_n + thread_col * TN;
+
+    const int inner_col_a = tid % BK;
+    const int inner_row_a = tid / BK;
+    constexpr int stride_a = num_threads / BK;
+
+    const int inner_col_b = tid % BN;
+    const int inner_row_b = tid / BN;
+    constexpr int stride_b = num_threads / BN;
+
+    float acc[TM * TN] = {0.0f};
+    float reg_m[TM];
+    float reg_n[TN];
+
+    for (int bk = 0; bk < K; bk += BK) {
+        for (int offset = 0; offset < BM; offset += stride_a) {
+            const int local_row = inner_row_a + offset;
+            const int row = offset_m + local_row;
+            const int k = bk + inner_col_a;
+            As[local_row * BK + inner_col_a] =
+                (row < M && k < K) ? A[row * K + k] : __float2bfloat16(0.0f);
+        }
+
+        for (int offset = 0; offset < BK; offset += stride_b) {
+            const int local_k = inner_row_b + offset;
+            const int k = bk + local_k;
+            const int col = offset_n + inner_col_b;
+            Bs[local_k * BN + inner_col_b] =
+                (k < K && col < N) ? B[col * K + k] : __float2bfloat16(0.0f);
+        }
+
+        __syncthreads();
+
+        for (int dot = 0; dot < BK; dot++) {
+            for (int i = 0; i < TM; i++)
+                reg_m[i] = __bfloat162float(As[(thread_row * TM + i) * BK + dot]);
+
+            for (int i = 0; i < TN; i++)
+                reg_n[i] = __bfloat162float(Bs[dot * BN + thread_col * TN + i]);
+
+            for (int i = 0; i < TM; i++) {
+                for (int j = 0; j < TN; j++)
+                    acc[i * TN + j] += reg_m[i] * reg_n[j];
+            }
+        }
+
+        __syncthreads();
+    }
+
+    for (int i = 0; i < TM; i++) {
+        const int row = row_base + i;
+        if (row < M) {
+            for (int j = 0; j < TN; j++) {
+                const int col = col_base + j;
+                if (col < N)
+                    C[row * N + col] = __float2bfloat16(acc[i * TN + j]);
+            }
+        }
+    }
+}
+
+void matmul_v0_block2d_bf16(const nv_bfloat16 *A, const nv_bfloat16 *B, nv_bfloat16 *C, int M, int N, int K) {
+    constexpr int BM = 128;
+    constexpr int BN = 128;
+    constexpr int BK = 8;
+    constexpr int TM = 8;
+    constexpr int TN = 8;
+    const dim3 threads((BM * BN) / (TM * TN));
+    const dim3 blocks((N + BN - 1) / BN, (M + BM - 1) / BM);
+    matmul_v0_block2d_kernel<BM, BN, BK, TM, TN><<<blocks, threads>>>(A, B, C, M, N, K);
 }
