@@ -23,7 +23,8 @@ The v0 kernels are CUDA-core baselines. They do not use tensor cores.
 
 | Kernel | TFLOPS | Performance relative to cuBLAS |
 |:-------|-------:|:-------------------------------|
-| naive  |   1.51 | 0.83%                          |
+| matmul_v0_naive |   1.51 | 0.83%                 |
+| matmul_v0_tiled |   7.39 | 4.05%                 |
 
 
 ## Notes

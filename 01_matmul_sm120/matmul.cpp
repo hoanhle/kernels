@@ -14,7 +14,8 @@ using MatmulBF16Fn = void(
     int N,
     int K);
 
-MatmulBF16Fn matmul_v0_bf16;
+MatmulBF16Fn matmul_v0_naive_bf16;
+MatmulBF16Fn matmul_v0_tiled_bf16;
 
 template <MatmulBF16Fn matmul_fn>
 at::Tensor matmul_pt(const at::Tensor& A, const at::Tensor& B) {
@@ -42,5 +43,6 @@ at::Tensor matmul_pt(const at::Tensor& A, const at::Tensor& B) {
 }
 
 TORCH_LIBRARY(matmul_sm120, m) {
-    m.def("matmul_v0(Tensor A, Tensor B) -> Tensor", &matmul_pt<matmul_v0_bf16>);
+    m.def("matmul_v0_naive(Tensor A, Tensor B) -> Tensor", &matmul_pt<matmul_v0_naive_bf16>);
+    m.def("matmul_v0_tiled(Tensor A, Tensor B) -> Tensor", &matmul_pt<matmul_v0_tiled_bf16>);
 }

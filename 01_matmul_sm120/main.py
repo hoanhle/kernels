@@ -70,10 +70,6 @@ def bench_triton(name, A, B):
 def profile_kernel(name, A, B):
     f = get_kernel(name)
 
-    for _ in range(5):
-        f(A, B)
-    torch.cuda.synchronize()
-
     with torch.cuda.nvtx.range(name):
         f(A, B)
     torch.cuda.synchronize()
@@ -96,7 +92,7 @@ def cmdline(shape, kernel, profile):
 
     print(f'shape: {shape}')
 
-    kernels = kernel or ['cublas', 'matmul_v0']
+    kernels = kernel or ['cublas', 'matmul_v0_naive', 'matmul_v0_tiled']
     for name in kernels:
         check_correctness(name, A, B)
         latency_ms = bench_triton(name, A, B)
