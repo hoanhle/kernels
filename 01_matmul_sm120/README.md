@@ -10,6 +10,7 @@ A is row-major [M, K]. B is logical [K, N] with column-major storage.
 | Kernel                                          |  TFLOPS | Performance relative to cuBLAS |
 |:------------------------------------------------|--------:|:------------------------------|
 | CuBLAS 12.8.4.1 via PyTorch 2.9.1 CUDA 12.8     |  182.68 | 100%                          |
+| v0 (tiled, block2d)                             |   29.76 | 16.29%                        |
 
 ## v0 
 
