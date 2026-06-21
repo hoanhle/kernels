@@ -25,9 +25,29 @@ The v0 kernels are CUDA-core baselines. They do not use tensor cores.
 |:-------|-------:|:-------------------------------|
 | matmul_v0_naive |   1.51 | 0.83%                 |
 | matmul_v0_tiled |   7.39 | 4.05%                 |
+| matmul_v0_block1d |  16.70 | 9.14%                 |
 
 
 ## Notes
+
+| Metric | Value |
+|:-------|:------|
+| Name | NVIDIA GeForce RTX 5090 |
+| Compute capability | 12.0 |
+| Max threads per block | 1024 |
+| Max threads per multiprocessor | 1536 |
+| Threads per warp | 32 |
+| Warp allocation granularity | Not in pasted deviceQuery |
+| Max registers per block | 65536 |
+| Max registers per multiprocessor | Not in pasted deviceQuery |
+| Register allocation unit size | Not in pasted deviceQuery |
+| Register allocation granularity | Not in pasted deviceQuery |
+| Total global memory | 32101 MiB / 33660534784 B |
+| Max shared memory per block, default | 49152 B |
+| CUDA runtime shared memory overhead per block | Not in pasted deviceQuery |
+| Shared memory per multiprocessor | 102400 B |
+| Multiprocessor count | 170 |
+| Max warps per multiprocessor | 48, computed from 1536 / 32 |
 
 ```zsh
 Device 0: "NVIDIA GeForce RTX 5090"
