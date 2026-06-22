@@ -20,9 +20,16 @@ The v0 kernels are CUDA-core baselines. They do not use tensor cores.
 |:-------|-------:|:-------------------------------|
 | matmul_v0_naive |   1.51 | 0.83%                 |
 | matmul_v0_tiled |   7.39 | 4.05%                 |
-| matmul_v0_block1d |  16.70 | 9.14%                 |
-| matmul_v0_block2d |  29.76 | 16.29%                 |
+| matmul_v0_block1d |  16.70 | 9.14%               |
+| matmul_v0_block2d |  29.76 | 16.29%              |
 
+## v1
+
+The v1 kernels use tensor cores. Threads first stage A and B tiles in shared memory, then use `ldmatrix` to load warp-level fragments into registers and `mma` to accumulate the matrix product.
+
+| Kernel | TFLOPS | Performance relative to cuBLAS |
+|:-------|-------:|:-------------------------------|
+| matmul_v1_mma_tiled |  72.90 | 39.90%            |
 
 ## Notes
 
@@ -32,6 +39,8 @@ The v0 kernels are CUDA-core baselines. They do not use tensor cores.
 | Compute capability | 12.0 |
 | Max threads per block | 1024 |
 | Max threads per multiprocessor | 1536 |
+| Tensor Cores / SM | 4 |
+| Tensor Cores | 680 |
 | Threads per warp | 32 |
 | Max registers per block | 65536 |
 | Total global memory | 32101 MiB / 33660534784 B |
@@ -80,6 +89,8 @@ Device 0: "NVIDIA GeForce RTX 5090"
 
 ## Resources
 
+- https://images.nvidia.com/aem-dam/Solutions/geforce/blackwell/nvidia-rtx-blackwell-gpu-architecture.pdf
+- https://docs.nvidia.com/cuda/parallel-thread-execution/
 - https://www.aleksagordic.com/blog/matmul
 - https://cudaforfun.substack.com/p/outperforming-cublas-on-h100-a-worklog
 - https://github.com/gau-nernst/learn-cuda/tree/main/02c_matmul_sm120

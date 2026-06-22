@@ -92,7 +92,14 @@ def cmdline(shape, kernel, profile):
 
     print(f'shape: {shape}')
 
-    kernels = kernel or ['cublas', 'matmul_v0_naive', 'matmul_v0_tiled', 'matmul_v0_block1d', 'matmul_v0_block2d']
+    kernels = kernel or [
+        'cublas',
+        'matmul_v0_naive',
+        'matmul_v0_tiled',
+        'matmul_v0_block1d',
+        'matmul_v0_block2d',
+        'matmul_v1_mma_tiled',
+    ]
     for name in kernels:
         check_correctness(name, A, B)
         latency_ms = bench_triton(name, A, B)
