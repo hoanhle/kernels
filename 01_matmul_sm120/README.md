@@ -11,6 +11,8 @@ A is row-major [M, K]. B is logical [K, N] with column-major storage.
 |:------------------------------------------------|--------:|:------------------------------|
 | CuBLAS 12.8.4.1 via PyTorch 2.9.1 CUDA 12.8     |  182.68 | 100%                          |
 | v0 (tiled, block2d)                             |   29.76 | 16.29%                        |
+| v1 (ldmatrix, mma_tiled)                        |  72.90  | 39.90%                        |
+| v2 (cp_async, double-buffered)                  |  161.39 | 88.34%                        |
 
 ## v0 
 
@@ -30,6 +32,73 @@ The v1 kernels use tensor cores. Threads first stage A and B tiles in shared mem
 | Kernel | TFLOPS | Performance relative to cuBLAS |
 |:-------|-------:|:-------------------------------|
 | matmul_v1_mma_tiled |  72.90 | 39.90%            |
+
+## v2
+
+v2 replaces v1's scalar global-to-shared-memory copies with 16-byte `cp.async` copies.
+
+The `cp.async` fast path requires `K` to be divisible by 8. Each copy moves eight BF16 elements, and `K % 8 == 0` keeps the start of every physical A and B row 16-byte aligned. Other K sizes fall back to v1 rather than mixing asynchronous and scalar copies.
+
+| Kernel | TFLOPS | Performance relative to cuBLAS |
+|:-------|-------:|:-------------------------------|
+| matmul_v2_cp_async |  117.80 | 64.49%            |
+| matmul_v2_cp_async_double_buffered | 161.39 | 88.34%           |
+
+### Double buffering and occupancy
+
+Each shared-memory stage holds one A tile and one B tile:
+
+```cpp
+smem_size = (BM + BN) * BK * sizeof(nv_bfloat16) * NUM_STAGES;
+```
+
+For `BM=128`, `BN=128`, `BK=32`, BF16 elements, and two stages:
+
+```text
+A tile    = 128 * 32 * 2 bytes = 8,192 bytes
+B tile    = 128 * 32 * 2 bytes = 8,192 bytes
+One stage = 16,384 bytes        = 16 KiB
+Two stages                        = 32,768 bytes = 32 KiB/block
+```
+
+The launch allocates this dynamic shared memory through its third argument:
+
+```cpp
+kernel<<<blocks, threads, smem_size>>>(...);
+```
+
+Using `BK=64` required 64 KiB/block, limited each SM to one resident block, and reached only 108.15 TFLOPS. Reducing `BK` to 32 requires 32 KiB/block, allowing two resident blocks after register limits are considered, and reaches 161.39 TFLOPS. Double buffering helped only after its shared-memory footprint preserved enough occupancy to hide latency.
+
+### Pipeline schedule
+
+`load_stage()` issues and commits asynchronous copies but does not wait for them to finish. With two stages, tiles alternate between shared-memory buffers:
+
+```text
+tile 0 -> stage 0
+tile 1 -> stage 1
+tile 2 -> stage 0
+tile 3 -> stage 1
+```
+
+The kernel preloads tile 0, then overlaps each subsequent load with computation:
+
+```text
+Issue load 0
+
+Issue load 1
+Wait for load 0
+Compute 0  || load 1 continues
+
+Issue load 2
+Wait for load 1
+Compute 1  || load 2 continues
+
+Issue load 3
+Wait for load 2
+Compute 2  || load 3 continues
+```
+
+`cp_async_wait_group<1>()` allows the newest copy group to remain in flight while requiring older groups issued by the calling thread to complete. The first `__syncthreads()` ensures every thread's portion of the current stage is ready before the block computes. The second ensures every thread has finished reading that stage before it is reused.
 
 ## Notes
 

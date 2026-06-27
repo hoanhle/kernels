@@ -7,3 +7,11 @@ CompileFlags:
     - -forward-unknown-to-host-compiler
     - --generate-code*
     - -gencode*
+
+---
+If:
+  PathMatch: .*\.cuh
+CompileFlags:
+  Add:
+    - -x
+    - cuda

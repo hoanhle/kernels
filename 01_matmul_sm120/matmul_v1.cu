@@ -1,39 +1,6 @@
-#include <cstdint>
+#include "common.cuh"
 
-#include <cuda_bf16.h>
 #include <cuda_runtime.h>
-
-//----------------------------------------------------------------------------
-// PTX helpers.
-
-__device__ inline uint32_t cvta_shared(const void *ptr) {
-    return static_cast<uint32_t>(__cvta_generic_to_shared(ptr));
-}
-
-__device__ inline void ldmatrix_x2(uint32_t reg[2], uint32_t addr) {
-    asm volatile(
-        "ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0, %1}, [%2];"
-        : "=r"(reg[0]), "=r"(reg[1])
-        : "r"(addr));
-}
-
-__device__ inline void ldmatrix_x4(uint32_t reg[4], uint32_t addr) {
-    asm volatile(
-        "ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];"
-        : "=r"(reg[0]), "=r"(reg[1]), "=r"(reg[2]), "=r"(reg[3])
-        : "r"(addr));
-}
-
-__device__ inline void mma_m16n8k16(const uint32_t A[4], const uint32_t B[2], float C[4]) {
-    asm volatile(
-        "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
-        "{%0, %1, %2, %3}, "
-        "{%4, %5, %6, %7}, "
-        "{%8, %9}, "
-        "{%0, %1, %2, %3};"
-        : "+f"(C[0]), "+f"(C[1]), "+f"(C[2]), "+f"(C[3])
-        : "r"(A[0]), "r"(A[1]), "r"(A[2]), "r"(A[3]), "r"(B[0]), "r"(B[1]));
-}
 
 //----------------------------------------------------------------------------
 // v1.mma_tiled: one CUDA block computes one BM x BN tile of C using multiple warps.
