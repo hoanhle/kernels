@@ -15,6 +15,25 @@ A is row-major [M, K]. B is logical [K, N] with column-major storage.
 | v2 (cp_async, double-buffered, swizzled)        |  180.40 | 86.11%                       |
 | v3 (TMA, double-buffered, swizzled)             |  197.38 | 94.21%                       |
 
+## Running
+
+Run selected kernels from the repository root:
+
+```bash
+python 01_matmul_sm120/main.py \
+    --kernel cublas \
+    --kernel matmul_v3_tma
+```
+
+Profile one kernel with Nsight Compute:
+
+```bash
+ncu --set full \
+    --kernel-name regex:matmul_v3_tma_kernel \
+    -o profile_matmul_v3_tma \
+    python 01_matmul_sm120/main.py --profile matmul_v3_tma
+```
+
 ## v0 
 
 The v0 kernels are CUDA-core baselines. They do not use tensor cores.
