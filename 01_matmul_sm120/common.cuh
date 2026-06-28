@@ -11,6 +11,15 @@ __device__ inline uint32_t cvta_shared(const void *ptr) {
     return static_cast<uint32_t>(__cvta_generic_to_shared(ptr));
 }
 
+template <int STRIDE_BYTES>
+__device__ inline int swizzle_16b_offset(int row, int chunk) {
+    static_assert(STRIDE_BYTES >= 16 && STRIDE_BYTES <= 128);
+    static_assert((STRIDE_BYTES & (STRIDE_BYTES - 1)) == 0);
+    constexpr int rows_per_xor = 128 / STRIDE_BYTES;
+    const int swizzled_chunk = chunk ^ ((row % 8) / rows_per_xor);
+    return row * STRIDE_BYTES + swizzled_chunk * 16;
+}
+
 __device__ inline void ldmatrix_x2(uint32_t reg[2], uint32_t addr) {
     asm volatile(
         "ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%0, %1}, [%2];"

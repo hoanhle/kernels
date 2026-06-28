@@ -132,7 +132,7 @@ void matmul_v1_mma_tiled_bf16(
 //----------------------------------------------------------------------------
 // v2.cp_async_double_buffered: load the next K tile while computing the current tile.
 
-template <int BM, int BN, int BK, int NUM_WARP_M, int NUM_WARP_N>
+template <bool SWIZZLED, int BM, int BN, int BK, int NUM_WARP_M, int NUM_WARP_N>
 __global__ void __launch_bounds__(NUM_WARP_M * NUM_WARP_N * 32, 1) matmul_v2_cp_async_double_buffered_kernel(
     const nv_bfloat16 *A,
     const nv_bfloat16 *B,
@@ -185,7 +185,14 @@ __global__ void __launch_bounds__(NUM_WARP_M * NUM_WARP_N * 32, 1) matmul_v2_cp_
             const int row = offset_m + local_row;
             const int k = bk + local_k;
             const bool valid = row < M && k < K;
-            const uint32_t dst = cvta_shared(As + idx);
+            uint32_t dst = cvta_shared(As + idx);
+
+            if constexpr (SWIZZLED) {
+                // Swizzle 16-byte chunks as they enter shared memory:
+                // https://leimao.github.io/blog/CUDA-Shared-Memory-Swizzling/
+                constexpr int stride_bytes = BK * sizeof(nv_bfloat16);
+                dst = cvta_shared(As) + swizzle_16b_offset<stride_bytes>(local_row, local_k / COPY_ELEMS);
+            }
 
             if (valid)
                 cp_async(dst, A + row * K + k);
@@ -199,7 +206,12 @@ __global__ void __launch_bounds__(NUM_WARP_M * NUM_WARP_N * 32, 1) matmul_v2_cp_
             const int col = offset_n + local_col;
             const int k = bk + local_k;
             const bool valid = col < N && k < K;
-            const uint32_t dst = cvta_shared(Bs + idx);
+            uint32_t dst = cvta_shared(Bs + idx);
+
+            if constexpr (SWIZZLED) {
+                constexpr int stride_bytes = BK * sizeof(nv_bfloat16);
+                dst = cvta_shared(Bs) + swizzle_16b_offset<stride_bytes>(local_col, local_k / COPY_ELEMS);
+            }
 
             if (valid)
                 cp_async(dst, B + col * K + k);
@@ -219,15 +231,29 @@ __global__ void __launch_bounds__(NUM_WARP_M * NUM_WARP_N * 32, 1) matmul_v2_cp_
 
             for (int n = 0; n < NUM_MMA_N; n++) {
                 const int local_col = warp_id_n * WARP_N + n * MMA_N + lane % 8;
-                const nv_bfloat16 *B_ptr = Bs + local_col * BK + k + (lane / 8) * 8;
-                ldmatrix_x2(B_reg[n], cvta_shared(B_ptr));
+                const int local_k = k + (lane / 8) * 8;
+                uint32_t src = cvta_shared(Bs + local_col * BK + local_k);
+
+                if constexpr (SWIZZLED) {
+                    constexpr int stride_bytes = BK * sizeof(nv_bfloat16);
+                    src = cvta_shared(Bs) + swizzle_16b_offset<stride_bytes>(local_col, local_k / COPY_ELEMS);
+                }
+
+                ldmatrix_x2(B_reg[n], src);
             }
 
             for (int m = 0; m < NUM_MMA_M; m++) {
                 uint32_t A_reg[4];
                 const int local_row = warp_id_m * WARP_M + m * MMA_M + lane % 16;
-                const nv_bfloat16 *A_ptr = As + local_row * BK + k + (lane / 16) * 8;
-                ldmatrix_x4(A_reg, cvta_shared(A_ptr));
+                const int local_k = k + (lane / 16) * 8;
+                uint32_t src = cvta_shared(As + local_row * BK + local_k);
+
+                if constexpr (SWIZZLED) {
+                    constexpr int stride_bytes = BK * sizeof(nv_bfloat16);
+                    src = cvta_shared(As) + swizzle_16b_offset<stride_bytes>(local_row, local_k / COPY_ELEMS);
+                }
+
+                ldmatrix_x4(A_reg, src);
 
                 for (int n = 0; n < NUM_MMA_N; n++)
                     mma_m16n8k16(A_reg, B_reg[n], acc[m][n]);
@@ -309,7 +335,34 @@ void matmul_v2_cp_async_double_buffered_bf16(
     constexpr int smem_size = (BM + BN) * BK * sizeof(nv_bfloat16) * NUM_STAGES;
     const dim3 threads(NUM_WARP_M * NUM_WARP_N * 32);
     const dim3 blocks((N + BN - 1) / BN, (M + BM - 1) / BM);
-    auto kernel = matmul_v2_cp_async_double_buffered_kernel<BM, BN, BK, NUM_WARP_M, NUM_WARP_N>;
+    auto kernel = matmul_v2_cp_async_double_buffered_kernel<false, BM, BN, BK, NUM_WARP_M, NUM_WARP_N>;
+
+    cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
+    kernel<<<blocks, threads, smem_size>>>(A, B, C, M, N, K);
+}
+
+void matmul_v2_cp_async_double_buffered_swizzled_bf16(
+    const nv_bfloat16 *A,
+    const nv_bfloat16 *B,
+    nv_bfloat16 *C,
+    int M,
+    int N,
+    int K) {
+    if (K % 8 != 0) {
+        matmul_v1_mma_tiled_bf16(A, B, C, M, N, K);
+        return;
+    }
+
+    constexpr int BM = 128;
+    constexpr int BN = 128;
+    constexpr int BK = 32;
+    constexpr int NUM_WARP_M = 4;
+    constexpr int NUM_WARP_N = 2;
+    constexpr int NUM_STAGES = 2;
+    constexpr int smem_size = (BM + BN) * BK * sizeof(nv_bfloat16) * NUM_STAGES;
+    const dim3 threads(NUM_WARP_M * NUM_WARP_N * 32);
+    const dim3 blocks((N + BN - 1) / BN, (M + BM - 1) / BM);
+    auto kernel = matmul_v2_cp_async_double_buffered_kernel<true, BM, BN, BK, NUM_WARP_M, NUM_WARP_N>;
 
     cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
     kernel<<<blocks, threads, smem_size>>>(A, B, C, M, N, K);

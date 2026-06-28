@@ -101,6 +101,7 @@ def cmdline(shape, kernel, profile):
         'matmul_v1_mma_tiled',
         'matmul_v2_cp_async',
         'matmul_v2_cp_async_double_buffered',
+        'matmul_v2_cp_async_double_buffered_swizzled',
     ]
     for name in kernels:
         check_correctness(name, A, B)

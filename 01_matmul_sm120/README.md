@@ -12,7 +12,7 @@ A is row-major [M, K]. B is logical [K, N] with column-major storage.
 | CuBLAS 12.8.4.1 via PyTorch 2.9.1 CUDA 12.8     |  182.68 | 100%                          |
 | v0 (tiled, block2d)                             |   29.76 | 16.29%                        |
 | v1 (ldmatrix, mma_tiled)                        |  72.90  | 39.90%                        |
-| v2 (cp_async, double-buffered)                  |  161.39 | 88.34%                        |
+| v2 (cp_async, double-buffered, swizzled)        |  180.40 | 98.75%                        |
 
 ## v0 
 
@@ -42,7 +42,8 @@ The `cp.async` fast path requires `K` to be divisible by 8. Each copy moves eigh
 | Kernel | TFLOPS | Performance relative to cuBLAS |
 |:-------|-------:|:-------------------------------|
 | matmul_v2_cp_async |  117.80 | 64.49%            |
-| matmul_v2_cp_async_double_buffered | 161.39 | 88.34%           |
+| matmul_v2_cp_async_double_buffered | 162.10 | 88.73%           |
+| matmul_v2_cp_async_double_buffered_swizzled | 180.40 | 98.75% |
 
 ### Double buffering and occupancy
 
