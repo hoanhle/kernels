@@ -7,31 +7,31 @@ Fixed M=N=K=4096. RTX 5090 has peak 209.5 BF16 TFLOPS and global memory bandwidt
 A is row-major [M, K]. B is logical [K, N] with column-major storage.
 
 
-| Kernel                                          |  TFLOPS | Performance relative to cuBLAS |
-|:------------------------------------------------|--------:|:------------------------------|
-| CuBLAS 12.8.4.1 via PyTorch 2.9.1 CUDA 12.8     |  182.68 | 100%                          |
-| v0 (tiled, block2d)                             |   29.76 | 16.29%                        |
-| v1 (ldmatrix, mma_tiled)                        |  72.90  | 39.90%                        |
-| v2 (cp_async, double-buffered, swizzled)        |  180.40 | 98.75%                        |
+| Kernel                                          |  TFLOPS | % of theoretical peak |
+|:------------------------------------------------|--------:|:-----------------------------|
+| CuBLAS 12.8.4.1 via PyTorch 2.9.1 CUDA 12.8     |  182.68 | 87.20%                       |
+| v0 (tiled, block2d)                             |   29.76 | 14.21%                       |
+| v1 (ldmatrix, mma_tiled)                        |  72.90  | 34.80%                       |
+| v2 (cp_async, double-buffered, swizzled)        |  180.40 | 86.11%                       |
 
 ## v0 
 
 The v0 kernels are CUDA-core baselines. They do not use tensor cores.
 
-| Kernel | TFLOPS | Performance relative to cuBLAS |
-|:-------|-------:|:-------------------------------|
-| matmul_v0_naive |   1.51 | 0.83%                 |
-| matmul_v0_tiled |   7.39 | 4.05%                 |
-| matmul_v0_block1d |  16.70 | 9.14%               |
-| matmul_v0_block2d |  29.76 | 16.29%              |
+| Kernel | TFLOPS | % of theoretical peak |
+|:-------|-------:|:-----------------------------|
+| matmul_v0_naive |   1.51 | 0.72%               |
+| matmul_v0_tiled |   7.39 | 3.53%               |
+| matmul_v0_block1d |  16.70 | 7.97%             |
+| matmul_v0_block2d |  29.76 | 14.21%            |
 
 ## v1
 
 The v1 kernels use tensor cores. Threads first stage A and B tiles in shared memory, then use `ldmatrix` to load warp-level fragments into registers and `mma` to accumulate the matrix product.
 
-| Kernel | TFLOPS | Performance relative to cuBLAS |
-|:-------|-------:|:-------------------------------|
-| matmul_v1_mma_tiled |  72.90 | 39.90%            |
+| Kernel | TFLOPS | % of theoretical peak |
+|:-------|-------:|:-----------------------------|
+| matmul_v1_mma_tiled |  72.90 | 34.80%          |
 
 ## v2
 
@@ -39,11 +39,11 @@ v2 replaces v1's scalar global-to-shared-memory copies with 16-byte `cp.async` c
 
 The `cp.async` fast path requires `K` to be divisible by 8. Each copy moves eight BF16 elements, and `K % 8 == 0` keeps the start of every physical A and B row 16-byte aligned. Other K sizes fall back to v1 rather than mixing asynchronous and scalar copies.
 
-| Kernel | TFLOPS | Performance relative to cuBLAS |
-|:-------|-------:|:-------------------------------|
-| matmul_v2_cp_async |  117.80 | 64.49%            |
-| matmul_v2_cp_async_double_buffered | 162.10 | 88.73%           |
-| matmul_v2_cp_async_double_buffered_swizzled | 180.40 | 98.75% |
+| Kernel | TFLOPS | % of theoretical peak |
+|:-------|-------:|:-----------------------------|
+| matmul_v2_cp_async |  117.80 | 56.23%          |
+| matmul_v2_cp_async_double_buffered | 162.10 | 77.37% |
+| matmul_v2_cp_async_double_buffered_swizzled | 180.40 | 86.11% |
 
 ### Shared-memory swizzling
 
