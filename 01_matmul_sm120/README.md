@@ -13,6 +13,7 @@ A is row-major [M, K]. B is logical [K, N] with column-major storage.
 | v0 (tiled, block2d)                             |   29.76 | 14.21%                       |
 | v1 (ldmatrix, mma_tiled)                        |  72.90  | 34.80%                       |
 | v2 (cp_async, double-buffered, swizzled)        |  180.40 | 86.11%                       |
+| v3 (TMA, double-buffered, swizzled)             |  197.38 | 94.21%                       |
 
 ## v0 
 
@@ -107,6 +108,25 @@ Compute 2  || load 3 continues
 ```
 
 `cp_async_wait_group<1>()` allows the newest copy group to remain in flight while requiring older groups issued by the calling thread to complete. The first `__syncthreads()` ensures every thread's portion of the current stage is ready before the block computes. The second ensures every thread has finished reading that stage before it is reused.
+
+## v3
+
+v3 preserves v2's `128 x 128 x 32` MMA tile, double buffering, and 64-byte swizzled shared-memory layout. It replaces the per-thread `cp.async` loops with two 2D TMA loads issued by one elected lane:
+
+| Kernel | TFLOPS | % of theoretical peak |
+|:-------|-------:|:-----------------------------|
+| matmul_v3_tma | 197.38 | 94.21% |
+
+```text
+TMA load A tile --+
+                  +--> stage mbarrier --> ldmatrix --> mma
+TMA load B tile --+
+```
+
+The host creates one `CUtensorMap` for A and one for B. Each descriptor records the global shape and stride, the shared-memory box shape, and `CU_TENSOR_MAP_SWIZZLE_64B`. Each pipeline stage has an `mbarrier` that completes only after both 8 KiB TMA loads have arrived.
+
+- [Async Data Movement: TMA](https://mlc.ai/modern-gpu-programming-for-mlsys/chapter_tma/index.html)
+- [CUDA Programming Guide: Using TMA](https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/async-copies.html#using-the-tensor-memory-accelerator-tma)
 
 ## Notes
 

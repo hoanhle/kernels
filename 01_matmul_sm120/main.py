@@ -19,6 +19,7 @@ torch.utils.cpp_extension.load(
         '-Xptxas=-v',
         '-gencode=arch=compute_120a,code=sm_120a',
     ],
+    extra_ldflags=['-lcuda'],  # cuTensorMapEncodeTiled()
     is_python_module=False,
     verbose=True,
 )
@@ -102,6 +103,7 @@ def cmdline(shape, kernel, profile):
         'matmul_v2_cp_async',
         'matmul_v2_cp_async_double_buffered',
         'matmul_v2_cp_async_double_buffered_swizzled',
+        'matmul_v3_tma',
     ]
     for name in kernels:
         check_correctness(name, A, B)

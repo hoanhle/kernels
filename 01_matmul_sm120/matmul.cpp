@@ -22,6 +22,7 @@ MatmulBF16Fn matmul_v1_mma_tiled_bf16;
 MatmulBF16Fn matmul_v2_cp_async_bf16;
 MatmulBF16Fn matmul_v2_cp_async_double_buffered_bf16;
 MatmulBF16Fn matmul_v2_cp_async_double_buffered_swizzled_bf16;
+MatmulBF16Fn matmul_v3_tma_bf16;
 
 template <MatmulBF16Fn matmul_fn>
 at::Tensor matmul_pt(const at::Tensor& A, const at::Tensor& B) {
@@ -61,4 +62,5 @@ TORCH_LIBRARY(matmul_sm120, m) {
     m.def(
         "matmul_v2_cp_async_double_buffered_swizzled(Tensor A, Tensor B) -> Tensor",
         &matmul_pt<matmul_v2_cp_async_double_buffered_swizzled_bf16>);
+    m.def("matmul_v3_tma(Tensor A, Tensor B) -> Tensor", &matmul_pt<matmul_v3_tma_bf16>);
 }
