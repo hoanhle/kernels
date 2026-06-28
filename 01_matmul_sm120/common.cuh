@@ -16,6 +16,9 @@ __device__ inline int swizzle_16b_offset(int row, int chunk) {
     static_assert(STRIDE_BYTES >= 16 && STRIDE_BYTES <= 128);
     static_assert((STRIDE_BYTES & (STRIDE_BYTES - 1)) == 0);
     constexpr int rows_per_xor = 128 / STRIDE_BYTES;
+    // Shared-memory bank layout and XOR swizzling:
+    // https://leimao.github.io/blog/CUDA-Shared-Memory-Bank/
+    // https://leimao.github.io/blog/CUDA-Shared-Memory-Swizzling/
     const int swizzled_chunk = chunk ^ ((row % 8) / rows_per_xor);
     return row * STRIDE_BYTES + swizzled_chunk * 16;
 }

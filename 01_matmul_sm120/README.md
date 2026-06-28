@@ -45,6 +45,13 @@ The `cp.async` fast path requires `K` to be divisible by 8. Each copy moves eigh
 | matmul_v2_cp_async_double_buffered | 162.10 | 88.73%           |
 | matmul_v2_cp_async_double_buffered_swizzled | 180.40 | 98.75% |
 
+### Shared-memory swizzling
+
+The swizzled kernel rearranges 16-byte chunks within each shared-memory row to reduce bank conflicts:
+
+- [CUDA Shared Memory Bank](https://leimao.github.io/blog/CUDA-Shared-Memory-Bank/)
+- [CUDA Shared Memory Swizzling](https://leimao.github.io/blog/CUDA-Shared-Memory-Swizzling/)
+
 ### Double buffering and occupancy
 
 Each shared-memory stage holds one A tile and one B tile:

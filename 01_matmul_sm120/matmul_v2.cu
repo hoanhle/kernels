@@ -189,6 +189,7 @@ __global__ void __launch_bounds__(NUM_WARP_M * NUM_WARP_N * 32, 1) matmul_v2_cp_
 
             if constexpr (SWIZZLED) {
                 // Swizzle 16-byte chunks as they enter shared memory:
+                // https://leimao.github.io/blog/CUDA-Shared-Memory-Bank/
                 // https://leimao.github.io/blog/CUDA-Shared-Memory-Swizzling/
                 constexpr int stride_bytes = BK * sizeof(nv_bfloat16);
                 dst = cvta_shared(As) + swizzle_16b_offset<stride_bytes>(local_row, local_k / COPY_ELEMS);
