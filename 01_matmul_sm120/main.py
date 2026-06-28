@@ -38,7 +38,7 @@ def parse_shape(shape):
 def make_inputs(M, N, K):
     scale = K**-0.5
     A = torch.randn(M, K, device='cuda').mul(scale).bfloat16()
-    B = torch.randn(N, K, device='cuda').mul(scale).bfloat16().T
+    B = torch.randn(N, K, device='cuda').bfloat16().T
     return A.contiguous(), B
 
 

@@ -21,8 +21,8 @@ __global__ void __launch_bounds__(NUM_WARP_M * NUM_WARP_N * 32, 1) matmul_v3_tma
     constexpr int MMA_M = 16;
     constexpr int MMA_N = 8;
     constexpr int MMA_K = 16;
-    constexpr int COPY_BYTES = 16;
-    constexpr int COPY_ELEMS = COPY_BYTES / sizeof(nv_bfloat16);
+    constexpr int SWIZZLE_CHUNK_BYTES = 16;
+    constexpr int SWIZZLE_CHUNK_ELEMS = SWIZZLE_CHUNK_BYTES / sizeof(nv_bfloat16);
     constexpr int NUM_STAGES = 2;
     constexpr int WARP_M = BM / NUM_WARP_M;
     constexpr int WARP_N = BN / NUM_WARP_N;
@@ -35,7 +35,7 @@ __global__ void __launch_bounds__(NUM_WARP_M * NUM_WARP_N * 32, 1) matmul_v3_tma
     static_assert(BM % NUM_WARP_M == 0);
     static_assert(BN % NUM_WARP_N == 0);
     static_assert(BK % MMA_K == 0);
-    static_assert(BK % COPY_ELEMS == 0);
+    static_assert(BK % SWIZZLE_CHUNK_ELEMS == 0);
     static_assert(BK * sizeof(nv_bfloat16) == 64);
     static_assert(WARP_M % MMA_M == 0);
     static_assert(WARP_N % MMA_N == 0);
@@ -86,7 +86,8 @@ __global__ void __launch_bounds__(NUM_WARP_M * NUM_WARP_N * 32, 1) matmul_v3_tma
                 const int local_k = k + (lane / 8) * 8;
                 constexpr int stride_bytes = BK * sizeof(nv_bfloat16);
                 const uint32_t src =
-                    cvta_shared(Bs) + swizzle_16b_offset<stride_bytes>(local_col, local_k / COPY_ELEMS);
+                    cvta_shared(Bs) +
+                    swizzle_16b_offset<stride_bytes>(local_col, local_k / SWIZZLE_CHUNK_ELEMS);
                 ldmatrix_x2(B_reg[n], src);
             }
 
@@ -96,7 +97,8 @@ __global__ void __launch_bounds__(NUM_WARP_M * NUM_WARP_N * 32, 1) matmul_v3_tma
                 const int local_k = k + (lane / 16) * 8;
                 constexpr int stride_bytes = BK * sizeof(nv_bfloat16);
                 const uint32_t src =
-                    cvta_shared(As) + swizzle_16b_offset<stride_bytes>(local_row, local_k / COPY_ELEMS);
+                    cvta_shared(As) +
+                    swizzle_16b_offset<stride_bytes>(local_row, local_k / SWIZZLE_CHUNK_ELEMS);
                 ldmatrix_x4(A_reg, src);
 
                 for (int n = 0; n < NUM_MMA_N; n++)
@@ -221,6 +223,5 @@ void matmul_v3_tma_bf16(
     const dim3 blocks((N + BN - 1) / BN, (M + BM - 1) / BM);
     auto kernel = matmul_v3_tma_kernel<BM, BN, BK, NUM_WARP_M, NUM_WARP_N>;
 
-    cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
     kernel<<<blocks, threads, smem_size>>>(A_tmap, B_tmap, C, M, N, K);
 }

@@ -338,7 +338,6 @@ void matmul_v2_cp_async_double_buffered_bf16(
     const dim3 blocks((N + BN - 1) / BN, (M + BM - 1) / BM);
     auto kernel = matmul_v2_cp_async_double_buffered_kernel<false, BM, BN, BK, NUM_WARP_M, NUM_WARP_N>;
 
-    cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
     kernel<<<blocks, threads, smem_size>>>(A, B, C, M, N, K);
 }
 
@@ -365,6 +364,5 @@ void matmul_v2_cp_async_double_buffered_swizzled_bf16(
     const dim3 blocks((N + BN - 1) / BN, (M + BM - 1) / BM);
     auto kernel = matmul_v2_cp_async_double_buffered_kernel<true, BM, BN, BK, NUM_WARP_M, NUM_WARP_N>;
 
-    cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_size);
     kernel<<<blocks, threads, smem_size>>>(A, B, C, M, N, K);
 }

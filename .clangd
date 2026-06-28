@@ -1,8 +1,8 @@
 CompileFlags:
   Add:
-    - -I/home/hoanh/workspace/kernels/.venv/lib/python3.12/site-packages/torch/include
-    - -I/home/hoanh/workspace/kernels/.venv/lib/python3.12/site-packages/torch/include/torch/csrc/api/include
-    - -I/usr/local/cuda-12.8/include
+    - -I../.venv/lib/python3.12/site-packages/torch/include
+    - -I../.venv/lib/python3.12/site-packages/torch/include/torch/csrc/api/include
+    - -I/usr/local/cuda/include
   Remove:
     - -forward-unknown-to-host-compiler
     - --generate-code*
