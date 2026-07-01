@@ -141,7 +141,7 @@ def compute_tflops(batch, heads, seq_len, head_dim, causal, direction, latency_m
     help='Attention shape as batch_heads_sequence_head-dimension',
     metavar='B_H_S_D',
     type=str,
-    default='1_16_4096_128',
+    default='4_16_4096_128',
     show_default=True,
 )
 @click.option(

@@ -2,26 +2,40 @@
 
 ## Setup
 
-Fixed B=1, H=16, S=4096, D=128 with BF16 inputs. The RTX 5090 has a
-theoretical peak of 209.5 BF16 TFLOPS.
+Fixed B=4, H=16, S=4096, D=128 with BF16 inputs.
 
 `q`, `k`, and `v` use the `[batch, heads, sequence, head dimension]` layout.
 
 PyTorch 2.9.1, CUDA 12.8, and cuDNN 9.10.2:
 
+The RTX 5090 has 170 SMs with four Tensor Cores per SM. Its theoretical dense
+BF16 Tensor Core peak with FP32 accumulation is:
+
+```text
+170 SMs
+* 4 Tensor Cores/SM
+* 128 BF16 FLOPs/Tensor Core/cycle
+* 2.407 billion cycles/second
+= 209.5 TFLOPS
+```
+
+An FMA counts as two FLOPs. NVIDIA states that its peak rates are based on the
+GPU Boost Clock. The measurements below used the default 575 W power limit with
+the SM clock locked to the rated 2.407 GHz boost clock.
+
 ### Causal
 
 | Kernel | TFLOPS | % of theoretical peak |
 |:-------|-------:|----------------------:|
-| PyTorch SDPA, FlashAttention backend | 144.01 | 68.74% |
-| PyTorch SDPA, cuDNN backend | 167.65 | 80.02% |
+| PyTorch SDPA, FlashAttention backend | 157.78 | 75.31% |
+| PyTorch SDPA, cuDNN backend | 179.83 | 85.84% |
 
 ### Non-causal
 
 | Kernel | TFLOPS | % of theoretical peak |
 |:-------|-------:|----------------------:|
-| PyTorch SDPA, FlashAttention backend | 163.78 | 78.18% |
-| PyTorch SDPA, cuDNN backend | 197.30 | 94.18% |
+| PyTorch SDPA, FlashAttention backend | 170.06 | 81.17% |
+| PyTorch SDPA, cuDNN backend | 192.72 | 91.99% |
 
 ## Running
 
@@ -53,6 +67,24 @@ Benchmark the combined forward and backward pass:
 python 02_attention_sm120/main.py \
     --direction forward-backward \
     --non-causal
+```
+
+### Reproducible clocks
+
+For more reproducible measurements, lock the SM clock to the 2.407 GHz clock
+used by NVIDIA to calculate the rated peak. Keep the default 575 W power limit
+so that the GPU is not power-throttled below the requested clock.
+
+The subshell restores dynamic clocking when the benchmark finishes or exits:
+
+```bash
+sudo -v
+(
+    trap 'sudo -n nvidia-smi -i 0 -rgc' EXIT
+    sudo -n nvidia-smi -i 0 -lgc 2407,2407
+
+    python 02_attention_sm120/main.py --non-causal
+)
 ```
 
 ## Baselines
@@ -92,3 +124,7 @@ Backward is approximately twice the forward FLOP count, so a combined
 forward-backward benchmark uses three times the forward count. Softmax,
 masking, scaling, and other elementwise operations are executed but excluded
 from the reported FLOP count.
+
+## Resources
+
+- [NVIDIA RTX Blackwell GPU Architecture](https://images.nvidia.com/aem-dam/Solutions/geforce/blackwell/nvidia-rtx-blackwell-gpu-architecture.pdf)
