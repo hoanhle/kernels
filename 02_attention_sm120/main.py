@@ -10,14 +10,28 @@ from triton.testing import do_bench
 # PyTorch baselines.
 
 def torch_naive(q, k, v, causal):
-    scores = torch.einsum('nhqd,nhkd->nhqk', q, k / math.sqrt(q.shape[-1]))
+    # q: [N, H, Q, D], k/v: [N, H, K, D].
+    # QK^T: N*H*Q*K dot products, each with D multiplies and D-1 adds
+    #        ~= 2*N*H*Q*K*D FLOPs.
+    scores = torch.einsum('nhqd,nhkd->nhqk', q, k)
+
+    # One scale per score: N*H*Q*K FLOPs.
+    scores /= math.sqrt(q.shape[-1])
 
     if causal:
+        # Masking is not counted as FLOPs. This naive implementation has
+        # already computed the full Q*K score matrix before applying the mask.
         seq_len = q.shape[-2]
         mask = torch.ones(seq_len, seq_len, device=q.device, dtype=torch.bool).triu(1)
         scores.masked_fill_(mask, -math.inf)
 
+    # Per score, softmax performs approximately one subtraction, one
+    # exponential, one reduction add, and one division. The conventional
+    # attention FLOP count excludes softmax and counts only the two matmuls.
     weights = scores.float().softmax(dim=-1).to(q.dtype)
+
+    # WV: ~= 2*N*H*Q*K*D FLOPs.
+    # Total conventional forward count: 4*N*H*Q*K*D FLOPs.
     return torch.einsum('nhqk,nhkd->nhqd', weights, v)
 
 
@@ -84,7 +98,9 @@ def check_correctness(name, q, k, v, causal):
 
     output = get_kernel(name)(q, k, v, causal)
     reference = fa(q, k, v, causal)
-    torch.testing.assert_close(output, reference, rtol=2e-2, atol=2e-2)
+    # Different fused reduction orders produce small absolute BF16 errors.
+    # The default atol=1e-5 is too strict when attention outputs are near zero.
+    torch.testing.assert_close(output, reference, rtol=1.6e-2, atol=3e-3)
 
 
 def bench_kernel(name, q, k, v, causal, direction, grad_output):
@@ -103,9 +119,13 @@ def profile_kernel(name, q, k, v, causal, direction, grad_output):
 
 
 def compute_tflops(batch, heads, seq_len, head_dim, causal, direction, latency_ms):
-    # Forward consists of q @ k.T and softmax(q @ k.T) @ v. Backward adds
-    # four matrix multiplications of the same size. Causal attention evaluates
-    # approximately half of the full attention matrix.
+    # Forward: scores = q @ k.T and output = weights @ v (two matmuls).
+    # Backward: dv = weights.T @ doutput, dweights = doutput @ v.T,
+    #           dq = dscores @ k, and dk = dscores.T @ q (four matmuls).
+    # Backward is therefore 2x forward, and forward-backward is 3x forward.
+    # Causal attention has S*(S+1)/2 valid query-key pairs instead of S*S,
+    # which approaches half as S grows. This is the effective FLOP count;
+    # implementations such as torch_naive may still compute the full matrix.
     causal_factor = 0.5 if causal else 1.0
     direction_factor = 3.0 if direction == 'forward-backward' else 1.0
     flops = 4 * batch * heads * seq_len**2 * head_dim * causal_factor * direction_factor
