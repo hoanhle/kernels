@@ -8,20 +8,9 @@ Fixed B=4, H=16, S=4096, D=128 with BF16 inputs.
 
 PyTorch 2.9.1, CUDA 12.8, and cuDNN 9.10.2:
 
-The RTX 5090 has 170 SMs with four Tensor Cores per SM. Its theoretical dense
-BF16 Tensor Core peak with FP32 accumulation is:
-
-```text
-170 SMs
-* 4 Tensor Cores/SM
-* 128 BF16 FLOPs/Tensor Core/cycle
-* 2.407 billion cycles/second
-= 209.5 TFLOPS
-```
-
-An FMA counts as two FLOPs. NVIDIA states that its peak rates are based on the
-GPU Boost Clock. The measurements below used the default 575 W power limit with
-the SM clock locked to the rated 2.407 GHz boost clock.
+NVIDIA reports a theoretical dense BF16 Tensor Core peak of 209.5 TFLOPS with
+FP32 accumulation at the 2.407 GHz GPU Boost Clock. The measurements below used
+the default 575 W power limit with the SM clock locked to 2.407 GHz.
 
 ### Causal
 
