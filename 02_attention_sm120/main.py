@@ -1,10 +1,31 @@
 import math
+from pathlib import Path
 
 import click
 import torch
 import torch.nn.functional as F
+import torch.utils.cpp_extension
 from torch.nn.attention import SDPBackend, sdpa_kernel
 from triton.testing import do_bench
+
+CURRENT_DIR = Path(__file__).resolve().parent
+
+torch.utils.cpp_extension.load(
+    'attention_sm120',
+    sources=[
+        CURRENT_DIR / 'attention.cpp',
+        *sorted(CURRENT_DIR.glob('attention_v*.cu')),
+    ],
+    extra_cuda_cflags=[
+        '-O3',
+        '-lineinfo',
+        '-Xptxas=-v',
+        '-gencode=arch=compute_120a,code=sm_120a',
+    ],
+    is_python_module=False,
+    verbose=True,
+)
+module = torch.ops.attention_sm120
 
 #----------------------------------------------------------------------------
 # PyTorch baselines.
@@ -61,6 +82,13 @@ def cudnn(q, k, v, causal):
             enable_gqa=q.shape[1] != k.shape[1],
         )
 
+
+#----------------------------------------------------------------------------
+# Custom kernels.
+
+def attention_v1_fwd(q, k, v, causal):
+    return module.attention_v1_fwd(q, k, v, causal)
+
 #----------------------------------------------------------------------------
 # Utilities.
 
@@ -99,6 +127,7 @@ def make_inputs(batch, q_heads, kv_heads, seq_len, head_dim, requires_grad):
 
 def get_kernel(name):
     kernels = {
+        'attention_v1_fwd': attention_v1_fwd,
         'cudnn': cudnn,
         'fa': fa,
         'naive': torch_naive,
@@ -110,6 +139,9 @@ def get_kernel(name):
 
 
 def run_kernel(name, q, k, v, causal, direction, grad_output):
+    if direction == 'forward-backward' and name.startswith('attention_v1'):
+        raise click.ClickException(f'{name} supports forward only')
+
     output = get_kernel(name)(q, k, v, causal)
     if direction == 'forward-backward':
         output.backward(grad_output)
@@ -130,8 +162,8 @@ def check_correctness(name, q, k, v, causal):
     reference = fa(q, k, v, causal)
     # Different fused reduction orders produce small absolute BF16 errors.
     # Early causal rows average few values and need a larger absolute tolerance.
-    naive_atol = 3e-2 if causal else 1e-2
-    atol = naive_atol if name == 'naive' else 3e-3
+    simple_atol = 3e-2 if causal else 1e-2
+    atol = simple_atol if name == 'naive' or name.startswith('attention_v1') else 3e-3
     torch.testing.assert_close(output, reference, rtol=1.6e-2, atol=atol)
 
 
@@ -224,7 +256,10 @@ def cmdline(shape, kernel, profile, direction, causal):
     normalized_shape = f'{batch}_{q_heads}_{kv_heads}_{seq_len}_{head_dim}'
     print(f'shape: {normalized_shape}, causal: {causal}, direction: {direction}')
 
-    kernels = kernel or ['fa', 'cudnn']
+    default_kernels = ['fa', 'cudnn']
+    if direction == 'forward':
+        default_kernels.append('attention_v1_fwd')
+    kernels = kernel or default_kernels
     for name in kernels:
         check_correctness(name, q, k, v, causal)
         latency_ms = bench_kernel(name, q, k, v, causal, direction, grad_output)

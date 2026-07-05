@@ -37,19 +37,21 @@ Forward BF16 MHA with B=8, Hq=Hkv=16, S=4096, and D=128.
 
 | Kernel | TFLOPS | % of theoretical peak |
 |:-------|-------:|----------------------:|
-| F.sdpa() (Flash Attention) | 166.21 | 79.34% |
-| F.sdpa() (CuDNN) | 188.06 | 89.77% |
+| F.sdpa() (Flash Attention) | 166.20 | 79.33% |
+| F.sdpa() (CuDNN) | 187.68 | 89.58% |
+| v1 (online softmax, tiling, mma, cp.async) | 128.67 | 61.42% |
 
 ### Non-causal
 
 | Kernel | TFLOPS | % of theoretical peak |
 |:-------|-------:|----------------------:|
-| F.sdpa() (Flash Attention) | 177.16 | 84.56% |
-| F.sdpa() (CuDNN) | 197.27 | 94.16% |
+| F.sdpa() (Flash Attention) | 177.04 | 84.51% |
+| F.sdpa() (CuDNN) | 197.34 | 94.20% |
+| v1 (online softmax, tiling, mma, cp.async) | 143.77 | 68.63% |
 
 ## Running
 
-Benchmark the FlashAttention and cuDNN backends from the repository root:
+Benchmark the custom kernel and PyTorch baselines from the repository root:
 
 ```bash
 python 02_attention_sm120/main.py --causal
@@ -101,6 +103,14 @@ Run the explicit PyTorch implementation:
 python 02_attention_sm120/main.py --kernel naive --non-causal
 ```
 
+Run only the first custom kernel:
+
+```bash
+python 02_attention_sm120/main.py \
+    --kernel attention_v1_fwd \
+    --non-causal
+```
+
 Benchmark the combined forward and backward pass:
 
 ```bash
@@ -126,6 +136,22 @@ sudo -v
     python 02_attention_sm120/main.py --non-causal
 )
 ```
+
+## v1
+
+v1 implements forward BF16 attention with `mma.sync`, 16-byte `cp.async`
+copies, and an online softmax. Each block owns 128 query rows and walks through
+32-row K/V tiles. Scores and output accumulators stay FP32 in registers; scores
+are never written to global memory. Exponentiated scores are converted to BF16
+for the weight-times-value MMA and normalized after the final K/V tile.
+
+The same kernel supports MHA and GQA without duplicating K/V:
+`kv_head = query_head / (Hq / Hkv)`. The causal specialization skips tiles
+above the diagonal and masks the diagonal tile.
+
+v1 supports `D=128` and sequence lengths divisible by 128. A 64-row K/V tile
+spilled registers and was slower, so v1 uses 32 rows. Copies are immediately
+awaited; buffering and shared-memory swizzling are left for later versions.
 
 ## Baselines
 
