@@ -11,6 +11,20 @@ __device__ inline uint32_t cvta_shared(const void *ptr) {
     return static_cast<uint32_t>(__cvta_generic_to_shared(ptr));
 }
 
+// https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-elect-sync
+__device__ inline bool elect_one_sync() {
+    int elected = 0;
+    asm volatile(
+        "{\n"
+        ".reg .pred p;\n"
+        "elect.sync _|p, %1;\n"
+        "@p mov.s32 %0, 1;\n"
+        "}"
+        : "+r"(elected)
+        : "r"(0xffffffff));
+    return elected;
+}
+
 // Split rows wider than 128 bytes into independent 128-byte panels, then XOR
 // the row within each panel's 16-byte chunk index. Global memory remains
 // row-major; cp.async stores and ldmatrix loads both use this physical offset.
@@ -84,4 +98,51 @@ __device__ inline void cp_async_wait_group() {
         "cp.async.wait_group %0;"
         :
         : "n"(N));
+}
+
+__device__ inline void mbarrier_init(uint32_t addr, int count) {
+    asm volatile(
+        "mbarrier.init.shared::cta.b64 [%0], %1;"
+        :
+        : "r"(addr), "r"(count));
+}
+
+__device__ inline void mbarrier_fence_init() {
+    asm volatile("fence.mbarrier_init.release.cluster;");
+}
+
+__device__ inline void mbarrier_arrive_expect_tx(uint32_t addr, int bytes) {
+    asm volatile(
+        "mbarrier.arrive.expect_tx.release.cta.shared::cta.b64 _, [%0], %1;"
+        :
+        : "r"(addr), "r"(bytes)
+        : "memory");
+}
+
+__device__ inline void mbarrier_wait(uint32_t addr, int phase) {
+    asm volatile(
+        "{\n"
+        ".reg .pred done;\n"
+        "wait:\n"
+        "mbarrier.try_wait.parity.acquire.cta.shared::cta.b64 done, [%0], %1;\n"
+        "@!done bra.uni wait;\n"
+        "}"
+        :
+        : "r"(addr), "r"(phase)
+        : "memory");
+}
+
+__device__ inline void tma_3d_g2s(
+    uint32_t dst,
+    const void *tensor_map,
+    int x,
+    int y,
+    int z,
+    uint32_t mbarrier) {
+    asm volatile(
+        "cp.async.bulk.tensor.3d.shared::cta.global.mbarrier::complete_tx::bytes "
+        "[%0], [%1, {%2, %3, %4}], [%5];"
+        :
+        : "r"(dst), "l"(tensor_map), "r"(x), "r"(y), "r"(z), "r"(mbarrier)
+        : "memory");
 }

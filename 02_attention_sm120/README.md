@@ -38,20 +38,22 @@ Forward BF16 MHA with B=8, Hq=Hkv=16, S=4096, and D=128.
 | Kernel | TFLOPS | % of theoretical peak |
 |:-------|-------:|----------------------:|
 | F.sdpa() (Flash Attention) | 166.10 | 79.28% |
-| F.sdpa() (CuDNN) | 187.90 | 89.69% |
-| v1 (online softmax, tiling, mma, cp.async) | 127.95 | 61.07% |
-| v2 (shared-memory swizzling) | 157.26 | 75.06% |
-| v3 (two-stage pipeline) | 163.88 | 78.22% |
+| F.sdpa() (CuDNN) | 187.35 | 89.43% |
+| v1 (online softmax, tiling, mma, cp.async) | 128.16 | 61.17% |
+| v2 (shared-memory swizzling) | 156.80 | 74.84% |
+| v3 (two-stage pipeline) | 164.13 | 78.34% |
+| v4 (TMA and mbarrier) | 165.70 | 79.09% |
 
 ### Non-causal
 
 | Kernel | TFLOPS | % of theoretical peak |
 |:-------|-------:|----------------------:|
-| F.sdpa() (Flash Attention) | 177.04 | 84.51% |
-| F.sdpa() (CuDNN) | 197.34 | 94.20% |
-| v1 (online softmax, tiling, mma, cp.async) | 143.66 | 68.57% |
-| v2 (shared-memory swizzling) | 170.62 | 81.44% |
-| v3 (two-stage pipeline) | 178.05 | 84.99% |
+| F.sdpa() (Flash Attention) | 177.01 | 84.49% |
+| F.sdpa() (CuDNN) | 197.42 | 94.23% |
+| v1 (online softmax, tiling, mma, cp.async) | 143.61 | 68.55% |
+| v2 (shared-memory swizzling) | 170.79 | 81.52% |
+| v3 (two-stage pipeline) | 177.98 | 84.95% |
+| v4 (TMA and mbarrier) | 182.38 | 87.05% |
 
 ## Running
 
@@ -114,6 +116,8 @@ python 02_attention_sm120/main.py \
     --kernel attention_v1_fwd \
     --kernel attention_v2_fwd \
     --kernel attention_v3_fwd \
+    --kernel attention_v4_fwd \
+    --kernel attention_v5_fwd \
     --non-causal
 ```
 
@@ -124,6 +128,11 @@ python 02_attention_sm120/main.py \
     --direction forward-backward \
     --non-causal
 ```
+
+### Profiling
+
+See the [Nsight Compute Kernel Profiling Guide](https://docs.nvidia.com/nsight-compute/pdf/ProfilingGuide.pdf)
+for NVIDIA's hardware model and metric definitions.
 
 ### Reproducible clocks
 
@@ -170,6 +179,13 @@ tile and its corresponding V tile. While the block computes attention using
 one stage, it loads the next K/V pair into the other stage. The pipeline reuses
 the 32 KiB shared-memory allocation used to stage Q after Q has moved into
 registers, so the shared-memory footprint remains unchanged.
+
+## v4
+
+v4 replaces v3's per-thread K/V copies with TMA loads issued by one elected
+lane. Each 256-byte K/V row is loaded as two 128-byte panels using hardware
+swizzling, and one `mbarrier` tracks completion of each 16 KiB pipeline stage.
+Q retains its one-time `cp.async` load.
 
 ## Baselines
 

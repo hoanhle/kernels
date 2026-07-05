@@ -21,6 +21,8 @@ using AttentionBF16Fn = void(
 AttentionBF16Fn attention_v1_fwd_bf16;
 AttentionBF16Fn attention_v2_fwd_bf16;
 AttentionBF16Fn attention_v3_fwd_bf16;
+AttentionBF16Fn attention_v4_fwd_bf16;
+AttentionBF16Fn attention_v5_fwd_bf16;
 
 template <AttentionBF16Fn attention_fn>
 at::Tensor attention_pt(
@@ -79,4 +81,10 @@ TORCH_LIBRARY(attention_sm120, m) {
     m.def(
         "attention_v3_fwd(Tensor Q, Tensor K, Tensor V, bool causal) -> Tensor",
         &attention_pt<attention_v3_fwd_bf16>);
+    m.def(
+        "attention_v4_fwd(Tensor Q, Tensor K, Tensor V, bool causal) -> Tensor",
+        &attention_pt<attention_v4_fwd_bf16>);
+    m.def(
+        "attention_v5_fwd(Tensor Q, Tensor K, Tensor V, bool causal) -> Tensor",
+        &attention_pt<attention_v5_fwd_bf16>);
 }

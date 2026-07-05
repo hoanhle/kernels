@@ -14,7 +14,7 @@ torch.utils.cpp_extension.load(
     'attention_sm120',
     sources=[
         CURRENT_DIR / 'attention.cpp',
-        *sorted(CURRENT_DIR.glob('attention_v*.cu')),
+        *sorted(CURRENT_DIR.glob('attention_*.cu')),
     ],
     extra_cuda_cflags=[
         '-O3',
@@ -22,6 +22,7 @@ torch.utils.cpp_extension.load(
         '-Xptxas=-v',
         '-gencode=arch=compute_120a,code=sm_120a',
     ],
+    extra_ldflags=['-lcuda'],  # cuTensorMapEncodeTiled()
     is_python_module=False,
     verbose=True,
 )
@@ -97,6 +98,14 @@ def attention_v2_fwd(q, k, v, causal):
 def attention_v3_fwd(q, k, v, causal):
     return module.attention_v3_fwd(q, k, v, causal)
 
+
+def attention_v4_fwd(q, k, v, causal):
+    return module.attention_v4_fwd(q, k, v, causal)
+
+
+def attention_v5_fwd(q, k, v, causal):
+    return module.attention_v5_fwd(q, k, v, causal)
+
 #----------------------------------------------------------------------------
 # Utilities.
 
@@ -138,6 +147,8 @@ def get_kernel(name):
         'attention_v1_fwd': attention_v1_fwd,
         'attention_v2_fwd': attention_v2_fwd,
         'attention_v3_fwd': attention_v3_fwd,
+        'attention_v4_fwd': attention_v4_fwd,
+        'attention_v5_fwd': attention_v5_fwd,
         'cudnn': cudnn,
         'fa': fa,
         'naive': torch_naive,
@@ -268,7 +279,15 @@ def cmdline(shape, kernel, profile, direction, causal):
 
     default_kernels = ['fa', 'cudnn']
     if direction == 'forward':
-        default_kernels.extend(['attention_v1_fwd', 'attention_v2_fwd', 'attention_v3_fwd'])
+        default_kernels.extend(
+            [
+                'attention_v1_fwd',
+                'attention_v2_fwd',
+                'attention_v3_fwd',
+                'attention_v4_fwd',
+                'attention_v5_fwd',
+            ]
+        )
     kernels = kernel or default_kernels
     for name in kernels:
         check_correctness(name, q, k, v, causal)

@@ -3,12 +3,19 @@
 #include <cfloat>
 #include <cstdint>
 
+#include <cuda.h>
 #include <cuda_runtime.h>
 
+#include <stdexcept>
+#include <string>
+
 //----------------------------------------------------------------------------
+// Forward attention versions.
 // v1.forward: tiled Tensor Core attention with an online softmax.
 // v2.forward: v1 with a 128-byte shared-memory swizzle.
 // v3.forward: v2 with double-buffered K/V tiles.
+// v4.forward: v3 with TMA global-to-shared copies and mbarrier synchronization.
+// v5.forward: v4 with a smaller query tile for higher occupancy.
 //
 // One CUDA block owns a BLOCK_Q tile for one query head. The query tile stays
 // in registers while the block walks over K/V tiles. MHA is the special case
@@ -42,16 +49,20 @@ __device__ inline void load_tile_async(nv_bfloat16 *dst, const nv_bfloat16 *src,
 template <
     bool SWIZZLED,
     bool PIPELINED,
+    bool TMA,
     bool CAUSAL,
     int BLOCK_Q,
     int BLOCK_KV,
     int HEAD_DIM,
-    int NUM_WARPS>
-__global__ void __launch_bounds__(NUM_WARPS * 32, 1) attention_fwd_kernel(
+    int NUM_WARPS,
+    int MIN_BLOCKS_PER_SM>
+__global__ void __launch_bounds__(NUM_WARPS * 32, MIN_BLOCKS_PER_SM) attention_fwd_kernel(
     const nv_bfloat16 *Q,
     const nv_bfloat16 *K,
     const nv_bfloat16 *V,
     nv_bfloat16 *O,
+    const __grid_constant__ CUtensorMap K_tmap,
+    const __grid_constant__ CUtensorMap V_tmap,
     int query_heads,
     int kv_heads,
     int sequence) {
@@ -65,12 +76,21 @@ __global__ void __launch_bounds__(NUM_WARPS * 32, 1) attention_fwd_kernel(
     constexpr int NUM_MMA_KV = BLOCK_KV / MMA_N;
     constexpr int NUM_MMA_HEAD_K = HEAD_DIM / MMA_K;
     constexpr int NUM_MMA_OUTPUT_N = HEAD_DIM / MMA_N;
+    constexpr int NUM_STAGES = 2;
+    constexpr int TILE_BYTES = BLOCK_Q * HEAD_DIM * sizeof(nv_bfloat16);
+    constexpr int PIPELINE_BYTES =
+        NUM_STAGES * 2 * BLOCK_KV * HEAD_DIM * sizeof(nv_bfloat16);
+    constexpr int DATA_BYTES =
+        PIPELINED && PIPELINE_BYTES > TILE_BYTES ? PIPELINE_BYTES : TILE_BYTES;
+    constexpr int MBARRIER_BYTES = TMA ? NUM_STAGES * sizeof(uint64_t) : 0;
 
     static_assert(WARP_Q % MMA_M == 0);
     static_assert(BLOCK_KV % MMA_K == 0);
     static_assert(HEAD_DIM % MMA_K == 0);
+    static_assert(!TMA || (SWIZZLED && PIPELINED));
 
-    __align__(16) __shared__ nv_bfloat16 tile[BLOCK_Q * HEAD_DIM];
+    __align__(1024) __shared__ unsigned char smem[DATA_BYTES + MBARRIER_BYTES];
+    nv_bfloat16 *tile = reinterpret_cast<nv_bfloat16 *>(smem);
 
     auto tile_addr = [&](const nv_bfloat16 *base, int row, int col) {
         if constexpr (SWIZZLED) {
@@ -83,6 +103,20 @@ __global__ void __launch_bounds__(NUM_WARPS * 32, 1) attention_fwd_kernel(
         }
     };
 
+    auto kv_tile_addr = [&](const nv_bfloat16 *base, int row, int col) {
+        if constexpr (TMA) {
+            constexpr int PANEL_ELEMENTS = 128 / sizeof(nv_bfloat16);
+            constexpr int PANEL_BYTES = BLOCK_KV * 128;
+            constexpr int VECTOR_ELEMENTS = 16 / sizeof(nv_bfloat16);
+            const int panel = col / PANEL_ELEMENTS;
+            const int chunk = (col % PANEL_ELEMENTS) / VECTOR_ELEMENTS;
+            return cvta_shared(base) + panel * PANEL_BYTES +
+                swizzle_128b_panel_offset<128>(row, chunk);
+        } else {
+            return tile_addr(base, row, col);
+        }
+    };
+
     const int tid = threadIdx.x;
     const int lane = tid % WARP_SIZE;
     const int warp_id = tid / WARP_SIZE;
@@ -92,6 +126,7 @@ __global__ void __launch_bounds__(NUM_WARPS * 32, 1) attention_fwd_kernel(
     const int query_start = query_block * BLOCK_Q;
     const int group_size = query_heads / kv_heads;
     const int kv_head = query_head / group_size;
+    const int kv_tensor = batch * kv_heads + kv_head;
 
     const size_t query_offset =
         (static_cast<size_t>(batch) * query_heads + query_head) * sequence * HEAD_DIM;
@@ -113,6 +148,18 @@ __global__ void __launch_bounds__(NUM_WARPS * 32, 1) attention_fwd_kernel(
         row_max[query_mma][1] = -FLT_MAX;
     }
 
+    const uint32_t smem_addr = cvta_shared(smem);
+    const uint32_t mbarrier_addr = smem_addr + DATA_BYTES;
+
+    if constexpr (TMA) {
+        if (tid == 0) {
+            for (int stage = 0; stage < NUM_STAGES; stage++)
+                mbarrier_init(mbarrier_addr + stage * sizeof(uint64_t), 1);
+            mbarrier_fence_init();
+        }
+        __syncthreads();
+    }
+
     load_tile_async<SWIZZLED, BLOCK_Q, HEAD_DIM, NUM_THREADS>(tile, Q, tid);
     cp_async_commit_group();
     cp_async_wait_group<0>();
@@ -128,13 +175,47 @@ __global__ void __launch_bounds__(NUM_WARPS * 32, 1) attention_fwd_kernel(
 
     const float softmax_scale = rsqrtf(static_cast<float>(HEAD_DIM));
     const int kv_limit = CAUSAL ? query_start + BLOCK_Q : sequence;
-    constexpr int NUM_STAGES = 2;
     constexpr int KV_TILE_ELEMENTS = BLOCK_KV * HEAD_DIM;
     constexpr int STAGE_ELEMENTS = 2 * KV_TILE_ELEMENTS;
+    constexpr int KV_TILE_BYTES = KV_TILE_ELEMENTS * sizeof(nv_bfloat16);
+    constexpr int STAGE_BYTES = STAGE_ELEMENTS * sizeof(nv_bfloat16);
+    constexpr int PANEL_ELEMENTS = 128 / sizeof(nv_bfloat16);
+    constexpr int PANEL_BYTES = BLOCK_KV * 128;
 
-    static_assert(NUM_STAGES * STAGE_ELEMENTS <= BLOCK_Q * HEAD_DIM);
+    static_assert(NUM_STAGES * STAGE_ELEMENTS * sizeof(nv_bfloat16) <= DATA_BYTES);
 
-    if constexpr (PIPELINED) {
+    auto load_tma_stage = [&](int stage, int kv_start) {
+        if (warp_id == 0 && elect_one_sync()) {
+            const uint32_t K_smem = smem_addr + stage * STAGE_BYTES;
+            const uint32_t V_smem = K_smem + KV_TILE_BYTES;
+            const uint32_t mbarrier =
+                mbarrier_addr + stage * sizeof(uint64_t);
+
+            for (int panel = 0; panel < HEAD_DIM / PANEL_ELEMENTS; panel++) {
+                const int head_start = panel * PANEL_ELEMENTS;
+                const int panel_offset = panel * PANEL_BYTES;
+                tma_3d_g2s(
+                    K_smem + panel_offset,
+                    &K_tmap,
+                    head_start,
+                    kv_start,
+                    kv_tensor,
+                    mbarrier);
+                tma_3d_g2s(
+                    V_smem + panel_offset,
+                    &V_tmap,
+                    head_start,
+                    kv_start,
+                    kv_tensor,
+                    mbarrier);
+            }
+            mbarrier_arrive_expect_tx(mbarrier, STAGE_BYTES);
+        }
+    };
+
+    if constexpr (TMA) {
+        load_tma_stage(0, 0);
+    } else if constexpr (PIPELINED) {
         // Q no longer needs shared memory. Reuse its 32 KiB allocation as two
         // stages, each containing one K tile followed by its matching V tile.
         load_tile_async<SWIZZLED, BLOCK_KV, HEAD_DIM, NUM_THREADS>(tile, K, tid);
@@ -160,26 +241,38 @@ __global__ void __launch_bounds__(NUM_WARPS * 32, 1) attention_fwd_kernel(
 
             const int next_start = kv_start + BLOCK_KV;
             if (next_start < kv_limit) {
+                const int next_stage = (kv_tile + 1) % NUM_STAGES;
+
                 // Issue the next stage before waiting for the current stage,
                 // allowing its global-to-shared copies to overlap computation.
-                const int next_stage = (kv_tile + 1) % NUM_STAGES;
-                nv_bfloat16 *next_K_tile = tile + next_stage * STAGE_ELEMENTS;
-                nv_bfloat16 *next_V_tile = next_K_tile + KV_TILE_ELEMENTS;
+                if constexpr (TMA) {
+                    load_tma_stage(next_stage, next_start);
+                } else {
+                    nv_bfloat16 *next_K_tile = tile + next_stage * STAGE_ELEMENTS;
+                    nv_bfloat16 *next_V_tile = next_K_tile + KV_TILE_ELEMENTS;
 
-                load_tile_async<SWIZZLED, BLOCK_KV, HEAD_DIM, NUM_THREADS>(
-                    next_K_tile,
-                    K + static_cast<size_t>(next_start) * HEAD_DIM,
-                    tid);
-                load_tile_async<SWIZZLED, BLOCK_KV, HEAD_DIM, NUM_THREADS>(
-                    next_V_tile,
-                    V + static_cast<size_t>(next_start) * HEAD_DIM,
-                    tid);
-                cp_async_commit_group();
-            } else {
+                    load_tile_async<SWIZZLED, BLOCK_KV, HEAD_DIM, NUM_THREADS>(
+                        next_K_tile,
+                        K + static_cast<size_t>(next_start) * HEAD_DIM,
+                        tid);
+                    load_tile_async<SWIZZLED, BLOCK_KV, HEAD_DIM, NUM_THREADS>(
+                        next_V_tile,
+                        V + static_cast<size_t>(next_start) * HEAD_DIM,
+                        tid);
+                    cp_async_commit_group();
+                }
+            } else if constexpr (!TMA) {
                 cp_async_commit_group();
             }
 
-            cp_async_wait_group<NUM_STAGES - 1>();
+            if constexpr (TMA) {
+                if (warp_id == 0)
+                    mbarrier_wait(
+                        mbarrier_addr + stage * sizeof(uint64_t),
+                        (kv_tile / NUM_STAGES) % 2);
+            } else {
+                cp_async_wait_group<NUM_STAGES - 1>();
+            }
             __syncthreads();
         } else {
             load_tile_async<SWIZZLED, BLOCK_KV, HEAD_DIM, NUM_THREADS>(
@@ -197,7 +290,7 @@ __global__ void __launch_bounds__(NUM_WARPS * 32, 1) attention_fwd_kernel(
             {
                 const int row = kv_mma * MMA_N + lane % MMA_N;
                 const int col = head_k * MMA_K + (lane / MMA_N) * 8;
-                ldmatrix_x2(K_reg[kv_mma], tile_addr(K_tile, row, col));
+                ldmatrix_x2(K_reg[kv_mma], kv_tile_addr(K_tile, row, col));
             }
 
             for (int query_mma = 0; query_mma < NUM_MMA_Q; query_mma++)
@@ -306,7 +399,7 @@ __global__ void __launch_bounds__(NUM_WARPS * 32, 1) attention_fwd_kernel(
                 const int col = output_n * MMA_N + (lane / MMA_M) * 8;
                 ldmatrix_x2_trans(
                     V_reg[kv_mma],
-                    tile_addr(V_tile, row, col));
+                    kv_tile_addr(V_tile, row, col));
             }
 
             for (int query_mma = 0; query_mma < NUM_MMA_Q; query_mma++)
@@ -336,7 +429,14 @@ __global__ void __launch_bounds__(NUM_WARPS * 32, 1) attention_fwd_kernel(
         }
 }
 
-template <bool SWIZZLED, bool PIPELINED, int BLOCK_Q, int BLOCK_KV>
+template <
+    bool SWIZZLED,
+    bool PIPELINED,
+    bool TMA,
+    int BLOCK_Q,
+    int BLOCK_KV,
+    int NUM_WARPS = 4,
+    int MIN_BLOCKS_PER_SM = 1>
 void launch_attention_fwd(
     const nv_bfloat16 *Q,
     const nv_bfloat16 *K,
@@ -347,10 +447,10 @@ void launch_attention_fwd(
     int kv_heads,
     int sequence,
     int head_dim,
-    bool causal) {
+    bool causal,
+    const CUtensorMap& K_tmap,
+    const CUtensorMap& V_tmap) {
     constexpr int HEAD_DIM = 128;
-    constexpr int NUM_WARPS = 4;
-
     const dim3 threads(NUM_WARPS * 32);
     const dim3 blocks(sequence / BLOCK_Q, query_heads, batch);
 
@@ -358,23 +458,49 @@ void launch_attention_fwd(
         attention_fwd_kernel<
             SWIZZLED,
             PIPELINED,
+            TMA,
             true,
             BLOCK_Q,
             BLOCK_KV,
             HEAD_DIM,
-            NUM_WARPS>
-            <<<blocks, threads>>>(Q, K, V, O, query_heads, kv_heads, sequence);
+            NUM_WARPS,
+            MIN_BLOCKS_PER_SM>
+            <<<blocks, threads>>>(
+                Q,
+                K,
+                V,
+                O,
+                K_tmap,
+                V_tmap,
+                query_heads,
+                kv_heads,
+                sequence);
     } else {
         attention_fwd_kernel<
             SWIZZLED,
             PIPELINED,
+            TMA,
             false,
             BLOCK_Q,
             BLOCK_KV,
             HEAD_DIM,
-            NUM_WARPS>
-            <<<blocks, threads>>>(Q, K, V, O, query_heads, kv_heads, sequence);
+            NUM_WARPS,
+            MIN_BLOCKS_PER_SM>
+            <<<blocks, threads>>>(
+                Q,
+                K,
+                V,
+                O,
+                K_tmap,
+                V_tmap,
+                query_heads,
+                kv_heads,
+                sequence);
     }
+}
+
+static CUtensorMap empty_tensor_map() {
+    return {};
 }
 
 void attention_v1_fwd_bf16(
@@ -388,8 +514,19 @@ void attention_v1_fwd_bf16(
     int sequence,
     int head_dim,
     bool causal) {
-    launch_attention_fwd<false, false, 128, 32>(
-        Q, K, V, O, batch, query_heads, kv_heads, sequence, head_dim, causal);
+    launch_attention_fwd<false, false, false, 128, 32>(
+        Q,
+        K,
+        V,
+        O,
+        batch,
+        query_heads,
+        kv_heads,
+        sequence,
+        head_dim,
+        causal,
+        empty_tensor_map(),
+        empty_tensor_map());
 }
 
 void attention_v2_fwd_bf16(
@@ -403,8 +540,19 @@ void attention_v2_fwd_bf16(
     int sequence,
     int head_dim,
     bool causal) {
-    launch_attention_fwd<true, false, 128, 32>(
-        Q, K, V, O, batch, query_heads, kv_heads, sequence, head_dim, causal);
+    launch_attention_fwd<true, false, false, 128, 32>(
+        Q,
+        K,
+        V,
+        O,
+        batch,
+        query_heads,
+        kv_heads,
+        sequence,
+        head_dim,
+        causal,
+        empty_tensor_map(),
+        empty_tensor_map());
 }
 
 void attention_v3_fwd_bf16(
@@ -418,6 +566,124 @@ void attention_v3_fwd_bf16(
     int sequence,
     int head_dim,
     bool causal) {
-    launch_attention_fwd<true, true, 128, 32>(
-        Q, K, V, O, batch, query_heads, kv_heads, sequence, head_dim, causal);
+    launch_attention_fwd<true, true, false, 128, 32>(
+        Q,
+        K,
+        V,
+        O,
+        batch,
+        query_heads,
+        kv_heads,
+        sequence,
+        head_dim,
+        causal,
+        empty_tensor_map(),
+        empty_tensor_map());
+}
+
+static void init_kv_tensor_map(
+    CUtensorMap *tensor_map,
+    const nv_bfloat16 *data,
+    int tensors,
+    int sequence,
+    int head_dim) {
+    constexpr uint32_t RANK = 3;
+    constexpr uint32_t PANEL_ELEMENTS = 128 / sizeof(nv_bfloat16);
+    constexpr uint32_t BLOCK_KV = 32;
+
+    const uint64_t global_dims[RANK] = {
+        static_cast<uint64_t>(head_dim),
+        static_cast<uint64_t>(sequence),
+        static_cast<uint64_t>(tensors),
+    };
+    const uint64_t global_strides[RANK - 1] = {
+        static_cast<uint64_t>(head_dim) * sizeof(nv_bfloat16),
+        static_cast<uint64_t>(sequence) * head_dim * sizeof(nv_bfloat16),
+    };
+    const uint32_t box_dims[RANK] = {PANEL_ELEMENTS, BLOCK_KV, 1};
+    const uint32_t element_strides[RANK] = {1, 1, 1};
+
+    const CUresult status = cuTensorMapEncodeTiled(
+        tensor_map,
+        CU_TENSOR_MAP_DATA_TYPE_BFLOAT16,
+        RANK,
+        const_cast<nv_bfloat16 *>(data),
+        global_dims,
+        global_strides,
+        box_dims,
+        element_strides,
+        CU_TENSOR_MAP_INTERLEAVE_NONE,
+        CU_TENSOR_MAP_SWIZZLE_128B,
+        CU_TENSOR_MAP_L2_PROMOTION_NONE,
+        CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+
+    if (status != CUDA_SUCCESS) {
+        const char *message = nullptr;
+        cuGetErrorString(status, &message);
+        throw std::runtime_error(
+            "cuTensorMapEncodeTiled failed: " +
+            std::string(message ? message : "unknown error"));
+    }
+}
+
+void attention_v4_fwd_bf16(
+    const nv_bfloat16 *Q,
+    const nv_bfloat16 *K,
+    const nv_bfloat16 *V,
+    nv_bfloat16 *O,
+    int batch,
+    int query_heads,
+    int kv_heads,
+    int sequence,
+    int head_dim,
+    bool causal) {
+    CUtensorMap K_tmap;
+    CUtensorMap V_tmap;
+    init_kv_tensor_map(&K_tmap, K, batch * kv_heads, sequence, head_dim);
+    init_kv_tensor_map(&V_tmap, V, batch * kv_heads, sequence, head_dim);
+
+    launch_attention_fwd<true, true, true, 128, 32>(
+        Q,
+        K,
+        V,
+        O,
+        batch,
+        query_heads,
+        kv_heads,
+        sequence,
+        head_dim,
+        causal,
+        K_tmap,
+        V_tmap);
+}
+
+void attention_v5_fwd_bf16(
+    const nv_bfloat16 *Q,
+    const nv_bfloat16 *K,
+    const nv_bfloat16 *V,
+    nv_bfloat16 *O,
+    int batch,
+    int query_heads,
+    int kv_heads,
+    int sequence,
+    int head_dim,
+    bool causal) {
+    CUtensorMap K_tmap;
+    CUtensorMap V_tmap;
+    init_kv_tensor_map(&K_tmap, K, batch * kv_heads, sequence, head_dim);
+    init_kv_tensor_map(&V_tmap, V, batch * kv_heads, sequence, head_dim);
+
+    launch_attention_fwd<true, true, true, 64, 32, 4, 3>(
+        Q,
+        K,
+        V,
+        O,
+        batch,
+        query_heads,
+        kv_heads,
+        sequence,
+        head_dim,
+        causal,
+        K_tmap,
+        V_tmap);
 }
