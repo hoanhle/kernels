@@ -19,6 +19,8 @@ using AttentionBF16Fn = void(
     bool causal);
 
 AttentionBF16Fn attention_v1_fwd_bf16;
+AttentionBF16Fn attention_v2_fwd_bf16;
+AttentionBF16Fn attention_v3_fwd_bf16;
 
 template <AttentionBF16Fn attention_fn>
 at::Tensor attention_pt(
@@ -38,11 +40,11 @@ at::Tensor attention_pt(
     TORCH_CHECK(Q.dim() == 4 && K.dim() == 4 && V.dim() == 4, "Q, K, and V must be rank-4 tensors");
     TORCH_CHECK(K.sizes() == V.sizes(), "K and V must have the same shape");
     TORCH_CHECK(Q.size(0) == K.size(0), "Q, K, and V must have the same batch size");
-    TORCH_CHECK(Q.size(2) == K.size(2), "v1 supports self-attention with equal Q and KV sequence lengths");
+    TORCH_CHECK(Q.size(2) == K.size(2), "Custom kernels support self-attention with equal Q and KV sequence lengths");
     TORCH_CHECK(Q.size(3) == K.size(3), "Q, K, and V must have the same head dimension");
     TORCH_CHECK(Q.size(1) % K.size(1) == 0, "The number of query heads must be divisible by the number of KV heads");
-    TORCH_CHECK(Q.size(3) == 128, "v1 supports head dimension 128");
-    TORCH_CHECK(Q.size(2) % 128 == 0, "v1 requires sequence length to be divisible by 128");
+    TORCH_CHECK(Q.size(3) == 128, "Custom kernels support head dimension 128");
+    TORCH_CHECK(Q.size(2) % 128 == 0, "Custom kernels require sequence length to be divisible by 128");
 
     const int batch = Q.size(0);
     const int query_heads = Q.size(1);
@@ -71,4 +73,10 @@ TORCH_LIBRARY(attention_sm120, m) {
     m.def(
         "attention_v1_fwd(Tensor Q, Tensor K, Tensor V, bool causal) -> Tensor",
         &attention_pt<attention_v1_fwd_bf16>);
+    m.def(
+        "attention_v2_fwd(Tensor Q, Tensor K, Tensor V, bool causal) -> Tensor",
+        &attention_pt<attention_v2_fwd_bf16>);
+    m.def(
+        "attention_v3_fwd(Tensor Q, Tensor K, Tensor V, bool causal) -> Tensor",
+        &attention_pt<attention_v3_fwd_bf16>);
 }

@@ -89,6 +89,14 @@ def cudnn(q, k, v, causal):
 def attention_v1_fwd(q, k, v, causal):
     return module.attention_v1_fwd(q, k, v, causal)
 
+
+def attention_v2_fwd(q, k, v, causal):
+    return module.attention_v2_fwd(q, k, v, causal)
+
+
+def attention_v3_fwd(q, k, v, causal):
+    return module.attention_v3_fwd(q, k, v, causal)
+
 #----------------------------------------------------------------------------
 # Utilities.
 
@@ -128,6 +136,8 @@ def make_inputs(batch, q_heads, kv_heads, seq_len, head_dim, requires_grad):
 def get_kernel(name):
     kernels = {
         'attention_v1_fwd': attention_v1_fwd,
+        'attention_v2_fwd': attention_v2_fwd,
+        'attention_v3_fwd': attention_v3_fwd,
         'cudnn': cudnn,
         'fa': fa,
         'naive': torch_naive,
@@ -139,7 +149,7 @@ def get_kernel(name):
 
 
 def run_kernel(name, q, k, v, causal, direction, grad_output):
-    if direction == 'forward-backward' and name.startswith('attention_v1'):
+    if direction == 'forward-backward' and name.startswith('attention_v'):
         raise click.ClickException(f'{name} supports forward only')
 
     output = get_kernel(name)(q, k, v, causal)
@@ -163,7 +173,7 @@ def check_correctness(name, q, k, v, causal):
     # Different fused reduction orders produce small absolute BF16 errors.
     # Early causal rows average few values and need a larger absolute tolerance.
     simple_atol = 3e-2 if causal else 1e-2
-    atol = simple_atol if name == 'naive' or name.startswith('attention_v1') else 3e-3
+    atol = simple_atol if name == 'naive' or name.startswith('attention_v') else 3e-3
     torch.testing.assert_close(output, reference, rtol=1.6e-2, atol=atol)
 
 
@@ -258,7 +268,7 @@ def cmdline(shape, kernel, profile, direction, causal):
 
     default_kernels = ['fa', 'cudnn']
     if direction == 'forward':
-        default_kernels.append('attention_v1_fwd')
+        default_kernels.extend(['attention_v1_fwd', 'attention_v2_fwd', 'attention_v3_fwd'])
     kernels = kernel or default_kernels
     for name in kernels:
         check_correctness(name, q, k, v, causal)

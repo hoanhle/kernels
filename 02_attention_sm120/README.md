@@ -37,9 +37,11 @@ Forward BF16 MHA with B=8, Hq=Hkv=16, S=4096, and D=128.
 
 | Kernel | TFLOPS | % of theoretical peak |
 |:-------|-------:|----------------------:|
-| F.sdpa() (Flash Attention) | 166.20 | 79.33% |
-| F.sdpa() (CuDNN) | 187.68 | 89.58% |
-| v1 (online softmax, tiling, mma, cp.async) | 128.67 | 61.42% |
+| F.sdpa() (Flash Attention) | 166.10 | 79.28% |
+| F.sdpa() (CuDNN) | 187.90 | 89.69% |
+| v1 (online softmax, tiling, mma, cp.async) | 127.95 | 61.07% |
+| v2 (shared-memory swizzling) | 157.26 | 75.06% |
+| v3 (two-stage pipeline) | 163.88 | 78.22% |
 
 ### Non-causal
 
@@ -47,7 +49,9 @@ Forward BF16 MHA with B=8, Hq=Hkv=16, S=4096, and D=128.
 |:-------|-------:|----------------------:|
 | F.sdpa() (Flash Attention) | 177.04 | 84.51% |
 | F.sdpa() (CuDNN) | 197.34 | 94.20% |
-| v1 (online softmax, tiling, mma, cp.async) | 143.77 | 68.63% |
+| v1 (online softmax, tiling, mma, cp.async) | 143.66 | 68.57% |
+| v2 (shared-memory swizzling) | 170.62 | 81.44% |
+| v3 (two-stage pipeline) | 178.05 | 84.99% |
 
 ## Running
 
@@ -103,11 +107,13 @@ Run the explicit PyTorch implementation:
 python 02_attention_sm120/main.py --kernel naive --non-causal
 ```
 
-Run only the first custom kernel:
+Compare the custom kernels:
 
 ```bash
 python 02_attention_sm120/main.py \
     --kernel attention_v1_fwd \
+    --kernel attention_v2_fwd \
+    --kernel attention_v3_fwd \
     --non-causal
 ```
 
@@ -149,9 +155,21 @@ The same kernel supports MHA and GQA without duplicating K/V:
 `kv_head = query_head / (Hq / Hkv)`. The causal specialization skips tiles
 above the diagonal and masks the diagonal tile.
 
-v1 supports `D=128` and sequence lengths divisible by 128. A 64-row K/V tile
-spilled registers and was slower, so v1 uses 32 rows. Copies are immediately
-awaited; buffering and shared-memory swizzling are left for later versions.
+v1 supports `D=128` and sequence lengths divisible by 128.
+
+## v2
+
+v2 keeps v1's tile sizes and computation but swizzles Q, K, and V in shared
+memory. The `cp.async` stores and `ldmatrix` loads use the same swizzled
+addresses, eliminating v1's shared-memory bank conflicts.
+
+## v3
+
+v3 adds a two-stage `cp.async` pipeline to v2. Each stage holds one 32-row K
+tile and its corresponding V tile. While the block computes attention using
+one stage, it loads the next K/V pair into the other stage. The pipeline reuses
+the 32 KiB shared-memory allocation used to stage Q after Q has moved into
+registers, so the shared-memory footprint remains unchanged.
 
 ## Baselines
 

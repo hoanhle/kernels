@@ -11,6 +11,23 @@ __device__ inline uint32_t cvta_shared(const void *ptr) {
     return static_cast<uint32_t>(__cvta_generic_to_shared(ptr));
 }
 
+// Split rows wider than 128 bytes into independent 128-byte panels, then XOR
+// the row within each panel's 16-byte chunk index. Global memory remains
+// row-major; cp.async stores and ldmatrix loads both use this physical offset.
+template <int ROW_BYTES>
+__device__ inline int swizzle_128b_panel_offset(int row, int chunk) {
+    constexpr int CHUNK_BYTES = 16;
+    constexpr int PANEL_BYTES = 128;
+    constexpr int CHUNKS_PER_PANEL = PANEL_BYTES / CHUNK_BYTES;
+
+    static_assert(ROW_BYTES % PANEL_BYTES == 0);
+
+    const int panel = chunk / CHUNKS_PER_PANEL;
+    const int chunk_in_panel = chunk % CHUNKS_PER_PANEL;
+    const int swizzled_chunk = chunk_in_panel ^ (row % CHUNKS_PER_PANEL);
+    return row * ROW_BYTES + panel * PANEL_BYTES + swizzled_chunk * CHUNK_BYTES;
+}
+
 // For QK^T, MMA expects column-major B = K^T[dimension, key], which has the
 // same physical storage as row-major K[key, dimension], so no transpose is needed.
 __device__ inline void ldmatrix_x2(uint32_t reg[2], uint32_t addr) {

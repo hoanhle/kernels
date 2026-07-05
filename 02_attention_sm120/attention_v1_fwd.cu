@@ -7,27 +7,47 @@
 
 //----------------------------------------------------------------------------
 // v1.forward: tiled Tensor Core attention with an online softmax.
+// v2.forward: v1 with a 128-byte shared-memory swizzle.
+// v3.forward: v2 with double-buffered K/V tiles.
 //
 // One CUDA block owns a BLOCK_Q tile for one query head. The query tile stays
 // in registers while the block walks over K/V tiles. MHA is the special case
 // query_heads == kv_heads; GQA maps multiple query heads to one KV head.
 
-template <int ROWS, int COLS, int NUM_THREADS>
+template <bool SWIZZLED, int ROWS, int COLS, int NUM_THREADS>
 __device__ inline void load_tile_async(nv_bfloat16 *dst, const nv_bfloat16 *src, int tid) {
     constexpr int VECTOR_BYTES = 16;
     constexpr int VECTOR_ELEMENTS = VECTOR_BYTES / sizeof(nv_bfloat16);
     constexpr int NUM_VECTORS = ROWS * COLS / VECTOR_ELEMENTS;
+    constexpr int ROW_BYTES = COLS * sizeof(nv_bfloat16);
+    constexpr int VECTORS_PER_ROW = COLS / VECTOR_ELEMENTS;
 
     static_assert(ROWS * COLS % VECTOR_ELEMENTS == 0);
 
     for (int vector = tid; vector < NUM_VECTORS; vector += NUM_THREADS) {
         const int element = vector * VECTOR_ELEMENTS;
-        cp_async(cvta_shared(dst + element), src + element);
+        uint32_t dst_addr = cvta_shared(dst + element);
+
+        if constexpr (SWIZZLED) {
+            const int row = vector / VECTORS_PER_ROW;
+            const int chunk = vector % VECTORS_PER_ROW;
+            dst_addr =
+                cvta_shared(dst) + swizzle_128b_panel_offset<ROW_BYTES>(row, chunk);
+        }
+
+        cp_async(dst_addr, src + element);
     }
 }
 
-template <bool CAUSAL, int BLOCK_Q, int BLOCK_KV, int HEAD_DIM, int NUM_WARPS>
-__global__ void __launch_bounds__(NUM_WARPS * 32, 1) attention_v1_fwd_kernel(
+template <
+    bool SWIZZLED,
+    bool PIPELINED,
+    bool CAUSAL,
+    int BLOCK_Q,
+    int BLOCK_KV,
+    int HEAD_DIM,
+    int NUM_WARPS>
+__global__ void __launch_bounds__(NUM_WARPS * 32, 1) attention_fwd_kernel(
     const nv_bfloat16 *Q,
     const nv_bfloat16 *K,
     const nv_bfloat16 *V,
@@ -51,6 +71,17 @@ __global__ void __launch_bounds__(NUM_WARPS * 32, 1) attention_v1_fwd_kernel(
     static_assert(HEAD_DIM % MMA_K == 0);
 
     __align__(16) __shared__ nv_bfloat16 tile[BLOCK_Q * HEAD_DIM];
+
+    auto tile_addr = [&](const nv_bfloat16 *base, int row, int col) {
+        if constexpr (SWIZZLED) {
+            constexpr int ROW_BYTES = HEAD_DIM * sizeof(nv_bfloat16);
+            constexpr int VECTOR_ELEMENTS = 16 / sizeof(nv_bfloat16);
+            return cvta_shared(base) +
+                swizzle_128b_panel_offset<ROW_BYTES>(row, col / VECTOR_ELEMENTS);
+        } else {
+            return cvta_shared(base + row * HEAD_DIM + col);
+        }
+    };
 
     const int tid = threadIdx.x;
     const int lane = tid % WARP_SIZE;
@@ -82,7 +113,7 @@ __global__ void __launch_bounds__(NUM_WARPS * 32, 1) attention_v1_fwd_kernel(
         row_max[query_mma][1] = -FLT_MAX;
     }
 
-    load_tile_async<BLOCK_Q, HEAD_DIM, NUM_THREADS>(tile, Q, tid);
+    load_tile_async<SWIZZLED, BLOCK_Q, HEAD_DIM, NUM_THREADS>(tile, Q, tid);
     cp_async_commit_group();
     cp_async_wait_group<0>();
     __syncthreads();
@@ -91,23 +122,74 @@ __global__ void __launch_bounds__(NUM_WARPS * 32, 1) attention_v1_fwd_kernel(
         for (int head_k = 0; head_k < NUM_MMA_HEAD_K; head_k++) {
             const int row = warp_id * WARP_Q + query_mma * MMA_M + lane % MMA_M;
             const int col = head_k * MMA_K + (lane / MMA_M) * 8;
-            ldmatrix_x4(Q_reg[query_mma][head_k], cvta_shared(tile + row * HEAD_DIM + col));
+            ldmatrix_x4(Q_reg[query_mma][head_k], tile_addr(tile, row, col));
         }
     __syncthreads();
 
     const float softmax_scale = rsqrtf(static_cast<float>(HEAD_DIM));
     const int kv_limit = CAUSAL ? query_start + BLOCK_Q : sequence;
+    constexpr int NUM_STAGES = 2;
+    constexpr int KV_TILE_ELEMENTS = BLOCK_KV * HEAD_DIM;
+    constexpr int STAGE_ELEMENTS = 2 * KV_TILE_ELEMENTS;
 
-    for (int kv_start = 0; kv_start < kv_limit; kv_start += BLOCK_KV) {
-        float scores[NUM_MMA_Q][NUM_MMA_KV][4] = {};
+    static_assert(NUM_STAGES * STAGE_ELEMENTS <= BLOCK_Q * HEAD_DIM);
 
-        load_tile_async<BLOCK_KV, HEAD_DIM, NUM_THREADS>(
-            tile,
-            K + static_cast<size_t>(kv_start) * HEAD_DIM,
+    if constexpr (PIPELINED) {
+        // Q no longer needs shared memory. Reuse its 32 KiB allocation as two
+        // stages, each containing one K tile followed by its matching V tile.
+        load_tile_async<SWIZZLED, BLOCK_KV, HEAD_DIM, NUM_THREADS>(tile, K, tid);
+        load_tile_async<SWIZZLED, BLOCK_KV, HEAD_DIM, NUM_THREADS>(
+            tile + KV_TILE_ELEMENTS,
+            V,
             tid);
         cp_async_commit_group();
-        cp_async_wait_group<0>();
-        __syncthreads();
+    }
+
+    for (int kv_tile = 0, kv_start = 0;
+         kv_start < kv_limit;
+         kv_tile++, kv_start += BLOCK_KV) {
+        float scores[NUM_MMA_Q][NUM_MMA_KV][4] = {};
+
+        nv_bfloat16 *K_tile = tile;
+        nv_bfloat16 *V_tile = tile;
+
+        if constexpr (PIPELINED) {
+            const int stage = kv_tile % NUM_STAGES;
+            K_tile = tile + stage * STAGE_ELEMENTS;
+            V_tile = K_tile + KV_TILE_ELEMENTS;
+
+            const int next_start = kv_start + BLOCK_KV;
+            if (next_start < kv_limit) {
+                // Issue the next stage before waiting for the current stage,
+                // allowing its global-to-shared copies to overlap computation.
+                const int next_stage = (kv_tile + 1) % NUM_STAGES;
+                nv_bfloat16 *next_K_tile = tile + next_stage * STAGE_ELEMENTS;
+                nv_bfloat16 *next_V_tile = next_K_tile + KV_TILE_ELEMENTS;
+
+                load_tile_async<SWIZZLED, BLOCK_KV, HEAD_DIM, NUM_THREADS>(
+                    next_K_tile,
+                    K + static_cast<size_t>(next_start) * HEAD_DIM,
+                    tid);
+                load_tile_async<SWIZZLED, BLOCK_KV, HEAD_DIM, NUM_THREADS>(
+                    next_V_tile,
+                    V + static_cast<size_t>(next_start) * HEAD_DIM,
+                    tid);
+                cp_async_commit_group();
+            } else {
+                cp_async_commit_group();
+            }
+
+            cp_async_wait_group<NUM_STAGES - 1>();
+            __syncthreads();
+        } else {
+            load_tile_async<SWIZZLED, BLOCK_KV, HEAD_DIM, NUM_THREADS>(
+                K_tile,
+                K + static_cast<size_t>(kv_start) * HEAD_DIM,
+                tid);
+            cp_async_commit_group();
+            cp_async_wait_group<0>();
+            __syncthreads();
+        }
 
         for (int head_k = 0; head_k < NUM_MMA_HEAD_K; head_k++) {
             uint32_t K_reg[NUM_MMA_KV][2];
@@ -115,7 +197,7 @@ __global__ void __launch_bounds__(NUM_WARPS * 32, 1) attention_v1_fwd_kernel(
             {
                 const int row = kv_mma * MMA_N + lane % MMA_N;
                 const int col = head_k * MMA_K + (lane / MMA_N) * 8;
-                ldmatrix_x2(K_reg[kv_mma], cvta_shared(tile + row * HEAD_DIM + col));
+                ldmatrix_x2(K_reg[kv_mma], tile_addr(K_tile, row, col));
             }
 
             for (int query_mma = 0; query_mma < NUM_MMA_Q; query_mma++)
@@ -207,13 +289,15 @@ __global__ void __launch_bounds__(NUM_WARPS * 32, 1) attention_v1_fwd_kernel(
                 row_sum[query_mma][1] * correction_1 + tile_sum[1];
         }
 
-        load_tile_async<BLOCK_KV, HEAD_DIM, NUM_THREADS>(
-            tile,
-            V + static_cast<size_t>(kv_start) * HEAD_DIM,
-            tid);
-        cp_async_commit_group();
-        cp_async_wait_group<0>();
-        __syncthreads();
+        if constexpr (!PIPELINED) {
+            load_tile_async<SWIZZLED, BLOCK_KV, HEAD_DIM, NUM_THREADS>(
+                V_tile,
+                V + static_cast<size_t>(kv_start) * HEAD_DIM,
+                tid);
+            cp_async_commit_group();
+            cp_async_wait_group<0>();
+            __syncthreads();
+        }
 
         for (int output_n = 0; output_n < NUM_MMA_OUTPUT_N; output_n++) {
             uint32_t V_reg[BLOCK_KV / MMA_K][2];
@@ -222,7 +306,7 @@ __global__ void __launch_bounds__(NUM_WARPS * 32, 1) attention_v1_fwd_kernel(
                 const int col = output_n * MMA_N + (lane / MMA_M) * 8;
                 ldmatrix_x2_trans(
                     V_reg[kv_mma],
-                    cvta_shared(tile + row * HEAD_DIM + col));
+                    tile_addr(V_tile, row, col));
             }
 
             for (int query_mma = 0; query_mma < NUM_MMA_Q; query_mma++)
@@ -252,8 +336,8 @@ __global__ void __launch_bounds__(NUM_WARPS * 32, 1) attention_v1_fwd_kernel(
         }
 }
 
-template <int BLOCK_Q, int BLOCK_KV>
-void launch_attention_v1(
+template <bool SWIZZLED, bool PIPELINED, int BLOCK_Q, int BLOCK_KV>
+void launch_attention_fwd(
     const nv_bfloat16 *Q,
     const nv_bfloat16 *K,
     const nv_bfloat16 *V,
@@ -271,10 +355,24 @@ void launch_attention_v1(
     const dim3 blocks(sequence / BLOCK_Q, query_heads, batch);
 
     if (causal) {
-        attention_v1_fwd_kernel<true, BLOCK_Q, BLOCK_KV, HEAD_DIM, NUM_WARPS>
+        attention_fwd_kernel<
+            SWIZZLED,
+            PIPELINED,
+            true,
+            BLOCK_Q,
+            BLOCK_KV,
+            HEAD_DIM,
+            NUM_WARPS>
             <<<blocks, threads>>>(Q, K, V, O, query_heads, kv_heads, sequence);
     } else {
-        attention_v1_fwd_kernel<false, BLOCK_Q, BLOCK_KV, HEAD_DIM, NUM_WARPS>
+        attention_fwd_kernel<
+            SWIZZLED,
+            PIPELINED,
+            false,
+            BLOCK_Q,
+            BLOCK_KV,
+            HEAD_DIM,
+            NUM_WARPS>
             <<<blocks, threads>>>(Q, K, V, O, query_heads, kv_heads, sequence);
     }
 }
@@ -290,6 +388,36 @@ void attention_v1_fwd_bf16(
     int sequence,
     int head_dim,
     bool causal) {
-    launch_attention_v1<128, 32>(
+    launch_attention_fwd<false, false, 128, 32>(
+        Q, K, V, O, batch, query_heads, kv_heads, sequence, head_dim, causal);
+}
+
+void attention_v2_fwd_bf16(
+    const nv_bfloat16 *Q,
+    const nv_bfloat16 *K,
+    const nv_bfloat16 *V,
+    nv_bfloat16 *O,
+    int batch,
+    int query_heads,
+    int kv_heads,
+    int sequence,
+    int head_dim,
+    bool causal) {
+    launch_attention_fwd<true, false, 128, 32>(
+        Q, K, V, O, batch, query_heads, kv_heads, sequence, head_dim, causal);
+}
+
+void attention_v3_fwd_bf16(
+    const nv_bfloat16 *Q,
+    const nv_bfloat16 *K,
+    const nv_bfloat16 *V,
+    nv_bfloat16 *O,
+    int batch,
+    int query_heads,
+    int kv_heads,
+    int sequence,
+    int head_dim,
+    bool causal) {
+    launch_attention_fwd<true, true, 128, 32>(
         Q, K, V, O, batch, query_heads, kv_heads, sequence, head_dim, causal);
 }
