@@ -60,8 +60,8 @@ Forward BF16 MHA with B=8, Hq=Hkv=16, S=4096, and D=128.
 Benchmark the custom kernel and PyTorch baselines from the repository root:
 
 ```bash
-python kernels/attention/fwd/sm120/main.py --causal
-python kernels/attention/fwd/sm120/main.py --non-causal
+python kernels/attention/main.py --causal
+python kernels/attention/main.py --non-causal
 ```
 
 The four-field shape syntax is an MHA shorthand:
@@ -79,7 +79,7 @@ B_HQ_HKV_S_D
 For example, this runs 16 query heads grouped over four KV heads:
 
 ```bash
-python kernels/attention/fwd/sm120/main.py \
+python kernels/attention/main.py \
     --shape 8_16_4_4096_128 \
     --non-causal
 ```
@@ -97,7 +97,7 @@ sequence length, and head dimension while reducing the KV heads.
 Run selected implementations:
 
 ```bash
-python kernels/attention/fwd/sm120/main.py \
+python kernels/attention/main.py \
     --kernel fa \
     --kernel cudnn \
     --non-causal
@@ -106,13 +106,13 @@ python kernels/attention/fwd/sm120/main.py \
 Run the explicit PyTorch implementation:
 
 ```bash
-python kernels/attention/fwd/sm120/main.py --kernel naive --non-causal
+python kernels/attention/main.py --kernel naive --non-causal
 ```
 
 Compare the custom kernels:
 
 ```bash
-python kernels/attention/fwd/sm120/main.py \
+python kernels/attention/main.py \
     --kernel attention_v1_fwd \
     --kernel attention_v2_fwd \
     --kernel attention_v3_fwd \
@@ -124,7 +124,7 @@ python kernels/attention/fwd/sm120/main.py \
 Benchmark the combined forward and backward pass:
 
 ```bash
-python kernels/attention/fwd/sm120/main.py \
+python kernels/attention/main.py \
     --direction forward-backward \
     --non-causal
 ```
@@ -148,7 +148,7 @@ sudo -v
     trap 'sudo -n nvidia-smi -i 0 -rgc' EXIT
     sudo -n nvidia-smi -i 0 -lgc 2407,2407
 
-    python kernels/attention/fwd/sm120/main.py --non-causal
+    python kernels/attention/main.py --non-causal
 )
 ```
 

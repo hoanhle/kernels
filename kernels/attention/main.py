@@ -13,8 +13,8 @@ CURRENT_DIR = Path(__file__).resolve().parent
 torch.utils.cpp_extension.load(
     'attention_sm120',
     sources=[
-        CURRENT_DIR / 'attention.cpp',
-        *sorted(CURRENT_DIR.glob('attention_*.cu')),
+        CURRENT_DIR / 'fwd' / 'sm120' / 'attention.cpp',
+        *sorted((CURRENT_DIR / 'fwd' / 'sm120').glob('attention_*.cu')),
     ],
     extra_cuda_cflags=[
         '-O3',
