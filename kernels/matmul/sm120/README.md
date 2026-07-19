@@ -20,7 +20,7 @@ A is row-major [M, K]. B is logical [K, N] with column-major storage.
 Run selected kernels from the repository root:
 
 ```bash
-python 01_matmul_sm120/main.py \
+python kernels/matmul/sm120/main.py \
     --kernel cublas \
     --kernel matmul_v3_tma
 ```
@@ -31,7 +31,7 @@ Profile one kernel with Nsight Compute:
 ncu --set full \
     --kernel-name regex:matmul_v3_tma_kernel \
     -o profile_matmul_v3_tma \
-    python 01_matmul_sm120/main.py --profile matmul_v3_tma
+    python kernels/matmul/sm120/main.py --profile matmul_v3_tma
 ```
 
 ## v0 
