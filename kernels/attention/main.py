@@ -189,6 +189,20 @@ def check_correctness(name, q, k, v, causal):
 
 
 def bench_kernel(name, q, k, v, causal, direction, grad_output):
+    if direction == 'backward':
+        if name not in {'fa', 'cudnn'}:
+            raise click.ClickException('backward benchmarking supports only fa and cudnn')
+
+        # Build the graph outside do_bench so only backward is timed. The
+        # fused backends save little state, so retaining the graph is cheap.
+        output = get_kernel(name)(q, k, v, causal)
+        torch.cuda.synchronize()
+
+        def run_backward():
+            output.backward(grad_output, retain_graph=True)
+
+        return do_bench(run_backward, grad_to_none=[q, k, v], return_mode='median')
+
     def run():
         clear_gradients(q, k, v)
         run_kernel(name, q, k, v, causal, direction, grad_output)
@@ -197,6 +211,25 @@ def bench_kernel(name, q, k, v, causal, direction, grad_output):
 
 
 def profile_kernel(name, q, k, v, causal, direction, grad_output):
+    if direction == 'backward':
+        if name.startswith('attention_v'):
+            raise click.ClickException(f'{name} supports forward only')
+
+        # Build the autograd graph before starting collection so that Nsight
+        # Compute sees only kernels launched by the backward pass.
+        output = get_kernel(name)(q, k, v, causal)
+        torch.cuda.synchronize()
+        clear_gradients(q, k, v)
+
+        torch.cuda.profiler.start()
+        try:
+            with torch.cuda.nvtx.range(f'{name}_backward'):
+                output.backward(grad_output)
+                torch.cuda.synchronize()
+        finally:
+            torch.cuda.profiler.stop()
+        return
+
     clear_gradients(q, k, v)
     with torch.cuda.nvtx.range(f'{name}_{direction}'):
         run_kernel(name, q, k, v, causal, direction, grad_output)
@@ -223,7 +256,12 @@ def compute_tflops(
     # implementations such as torch_naive may still compute the full matrix.
     causal_factor = 0.5 if causal else 1.0
     backward_factor = 2.5 if recompute_scores else 2.0
-    direction_factor = 1.0 + backward_factor if direction == 'forward-backward' else 1.0
+    if direction == 'backward':
+        direction_factor = backward_factor
+    elif direction == 'forward-backward':
+        direction_factor = 1.0 + backward_factor
+    else:
+        direction_factor = 1.0
     flops = 4 * batch * q_heads * seq_len**2 * head_dim * causal_factor * direction_factor
     return flops / latency_ms / 1e9
 
@@ -255,7 +293,7 @@ def compute_tflops(
 )
 @click.option(
     '--direction',
-    type=click.Choice(['forward', 'forward-backward']),
+    type=click.Choice(['forward', 'backward', 'forward-backward']),
     default='forward',
     show_default=True,
 )
@@ -266,7 +304,7 @@ def cmdline(shape, kernel, profile, direction, causal):
         raise click.ClickException('CUDA is not available')
 
     batch, q_heads, kv_heads, seq_len, head_dim = parse_shape(shape)
-    requires_grad = direction == 'forward-backward'
+    requires_grad = direction != 'forward'
     q, k, v = make_inputs(batch, q_heads, kv_heads, seq_len, head_dim, requires_grad)
     grad_output = torch.randn_like(q) if requires_grad else None
 
